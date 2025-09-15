@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import "./index.css";
 import App from "./App";
-
+import "./pdf.worker";
 function Upload() {
   return <div className="p-6">Upload page (PDFs go here)</div>;
 }
