@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { uploadPdf, ask, chat, chatStream } from "./lib/api";
-import PdfPanel from "./components/PdfPanel";
+import DocLibrary from "./components/DocLibrary";
 import Toast from "./components/Toast";
+import PdfPanel from "./components/PdfPanel";
 
 type Retrieved = {
   text: string;
@@ -31,6 +32,10 @@ function Chip({
 
 export default function App() {
   const [docId, setDocId] = useState<string>("");
+  // NEW: query scope (null = all PDFs, string = only this doc)
+  const [docListRefreshKey, setDocListRefreshKey] = useState(0);
+  const [queryScopeDoc, setQueryScopeDoc] = useState<string | null>(null);
+
   const [question, setQuestion] = useState("");
   const [retrieved, setRetrieved] = useState<Retrieved[]>([]);
   const [answer, setAnswer] = useState<string>(""); // non-streaming RAG
@@ -71,6 +76,9 @@ export default function App() {
     try {
       const r = await uploadPdf(file);
       setDocId(r.doc_id);
+      // NEW: set newly uploaded doc as the active query scope
+      setQueryScopeDoc(r.doc_id);
+      setDocListRefreshKey((k) => k + 1);
       setNotice(
         "Uploaded. Indexing in background — wait a few seconds before your first query."
       );
@@ -92,7 +100,8 @@ export default function App() {
     if (!question.trim()) return;
     setBusy(true);
     try {
-      const r = await ask(question, 5);
+      // NEW: pass queryScopeDoc (null = all PDFs, string = only that doc)
+      const r = await ask(question, 5, queryScopeDoc || undefined);
       setRetrieved(r.results || []);
       if (!r.results?.length) {
         setNotice(
@@ -112,7 +121,8 @@ export default function App() {
     if (!question.trim()) return;
     setBusy(true);
     try {
-      const r = await chat(question, 5);
+      // NEW: pass queryScopeDoc
+      const r = await chat(question, 5, queryScopeDoc || undefined);
       setAnswer(r.answer);
       setCites(r.citations || []);
     } catch (e: any) {
@@ -132,6 +142,7 @@ export default function App() {
     setStreamText("");
     setStreamCites([]);
 
+    // NEW: pass queryScopeDoc into stream
     closeStreamRef.current = chatStream(
       question,
       5,
@@ -143,7 +154,8 @@ export default function App() {
       () => {
         setError("Streaming error");
         setStreaming(false);
-      }
+      },
+      queryScopeDoc || undefined
     );
   }
 
@@ -170,6 +182,17 @@ export default function App() {
       </header>
 
       <main className="max-w-5xl mx-auto p-6 space-y-6">
+        {/* NEW: Document Library + Scope toggle */}
+        <DocLibrary
+          activeDoc={docId}
+          refreshKey={docListRefreshKey}
+          onSelect={(chosen) => setQueryScopeDoc(chosen)} // null => all PDFs
+          onDeleted={(deletedId) => {
+            if (docId === deletedId) setDocId("");
+            if (queryScopeDoc === deletedId) setQueryScopeDoc(null);
+          }}
+        />
+
         {/* Upload */}
         <section className="p-6 bg-white rounded-xl shadow space-y-3">
           <h2 className="text-xl font-semibold">Upload PDF</h2>

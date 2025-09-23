@@ -63,3 +63,16 @@ class FaissStore:
             m["score"] = float(score)
             results.append(m)
         return results
+    def delete_by_doc(self, doc_id: str):
+        """
+        Remove all vectors where meta['doc_id'] == doc_id.
+        Rebuild the index (simple approach good for small sets).
+        """
+        if not self.metas:
+            return
+        keep = [i for i, m in enumerate(self.metas) if m.get("doc_id") != doc_id]
+        if len(keep) == len(self.metas):
+            return
+        self.metas = [self.metas[i] for i in keep]
+        self.embs = self.embs[keep, :] 
+        self._rebuild()                 
