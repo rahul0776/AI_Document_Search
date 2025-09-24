@@ -13,19 +13,40 @@ class DocMetaStore:
             self.meta_path.write_text("[]", encoding="utf-8")
 
     def _read(self) -> List[Dict]:
-        return json.loads(self.meta_path.read_text(encoding="utf-8") or "[]")
+        try:
+            txt = self.meta_path.read_text(encoding="utf-8")
+            return json.loads(txt or "[]")
+        except Exception:
+            return []
 
     def _write(self, items: List[Dict]):
-        self.meta_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.meta_path.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
-    def add(self, doc_id: str, filename: str, pages: int):
+    def add(self, doc_id: str, filename: str, pages: int = 0, title: str | None = None):
+        """Idempotent upsert by doc_id."""
         items = self._read()
-        items.append({
-            "doc_id": doc_id,
-            "filename": filename,
-            "pages": pages,
-            "uploaded_at": datetime.utcnow().isoformat() + "Z",
-        })
+        now = datetime.utcnow().isoformat()
+        found = False
+        for it in items:
+            if it.get("doc_id") == doc_id:
+                it["filename"] = filename
+                it["pages"] = pages
+                it["title"] = title
+                # keep original uploaded_at if present
+                it.setdefault("uploaded_at", now)
+                found = True
+                break
+        if not found:
+            items.append({
+                "doc_id": doc_id,
+                "filename": filename,
+                "pages": pages,
+                "uploaded_at": now,
+                "title": title,
+            })
         self._write(items)
 
     def all(self) -> List[Dict]:
@@ -33,5 +54,5 @@ class DocMetaStore:
 
     def delete(self, doc_id: str):
         items = self._read()
-        items = [x for x in items if x["doc_id"] != doc_id]
+        items = [x for x in items if x.get("doc_id") != doc_id]
         self._write(items)

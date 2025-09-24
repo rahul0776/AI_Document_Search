@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
-
+from services.rerank import mmr_rerank
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -15,7 +15,6 @@ from sse_starlette.sse import EventSourceResponse
 
 # local imports
 from ingestion.pdf_text import extract_pdf_text
-from ingestion.chunker import chunk_pages
 from services.embeddings import embed_texts, Settings as EmbSettings
 from retrieval.vector_store import FaissStore
 from models.schemas import UploadResponse, AskRequest, AskResult
@@ -111,21 +110,31 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
         try:
             log.info(f"[INDEX] begin: {doc_id}")
             pages = extract_pdf_text(str(dest))
-            chunks = list(chunk_pages(pages, chunk_chars=1200, overlap=150))
+            from ingestion.pdf_text import guess_title
+            from ingestion.chunker import smart_chunk_pages
 
-            # update real page count in metadata
+            title = guess_title(pages) or file.filename.rsplit(".", 1)[0]
             try:
-                META.add(doc_id, file.filename, pages=len(pages))
+                META.add(doc_id, file.filename, pages=len(pages), title=title)
             except Exception:
                 pass
 
+            chunks = list(smart_chunk_pages(pages, target_chars=900, overlap_chars=120))
             if not chunks:
                 log.warning(f"[INDEX] no chunks for {doc_id}")
                 return 0
 
             texts = [c["text"] for c in chunks]
             embs = embed_texts(texts, model=emb_settings.embed_model)
-            metas = [{"text": c["text"][:1000], "page": c["page"], "doc_id": doc_id} for c in chunks]
+            metas = [
+                {
+                    "text": c["text"][:1000],
+                    "page": c["page"],
+                    "doc_id": doc_id,
+                    "title": title,
+                }
+                for c in chunks
+            ]
             INDEX.upsert(embs, metas)
             log.info(f"[INDEX] done: {doc_id} chunks={len(chunks)}")
             return len(chunks)
@@ -143,15 +152,19 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
 # ───────────── Ask (retrieve only) ─────────────
 @app.post("/ask", response_model=AskResult)
 async def ask(payload: AskRequest):
+    if INDEX.is_empty():
+        # /ask:
+        return {"results": []}
     """
     Accepts optional payload.doc_id to limit hits to a single PDF.
     """
     qemb = embed_texts([payload.question])[0]
     # retrieve wider, then filter & trim
-    hits = INDEX.search(qemb, k=max(50, payload.top_k))
-
-    doc_id = getattr(payload, "doc_id", None)  # optional if your schema lacks it
-    hits = _filter_hits_by_doc(hits, doc_id, payload.top_k)
+    hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
+    doc_id = getattr(payload, "doc_id", None) if hasattr(payload, "doc_id") else None
+    # or for chat_stream use the function param doc_id
+    hits = _filter_hits_by_doc(hits, doc_id, 50)  # keep wider pool first
+    hits = mmr_rerank(payload.question if hasattr(payload, "question") else question, hits, top_k=payload.top_k if hasattr(payload, "top_k") else top_k)
 
     # Trim text for frontend display
     for h in hits:
@@ -163,14 +176,18 @@ async def ask(payload: AskRequest):
 # ───────────── Chat (non-streaming) ─────────────
 @app.post("/chat", response_model=ChatResult)
 async def chat(payload: ChatRequest):
+        # /chat:
+    if INDEX.is_empty():
+        return {"answer": "Please upload a PDF first. I don't have any documents to search yet.", "citations": []}
     """
     Accepts optional payload.doc_id to limit hits to a single PDF.
     """
     qemb = embed_texts([payload.question])[0]
-    hits = INDEX.search(qemb, k=max(50, payload.top_k))
-
-    doc_id = getattr(payload, "doc_id", None)
-    hits = _filter_hits_by_doc(hits, doc_id, payload.top_k)
+    hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
+    doc_id = getattr(payload, "doc_id", None) if hasattr(payload, "doc_id") else None
+    # or for chat_stream use the function param doc_id
+    hits = _filter_hits_by_doc(hits, doc_id, 50)  # keep wider pool first
+    hits = mmr_rerank(payload.question if hasattr(payload, "question") else question, hits, top_k=payload.top_k if hasattr(payload, "top_k") else top_k)
 
     if not hits or hits[0].get("score", 0) < 0.05:  # simple low-confidence guard
         return {"answer": "I don't know. I couldn't find enough supporting context.", "citations": []}
@@ -186,14 +203,22 @@ async def chat_stream(
     top_k: int = 5,
     doc_id: str | None = None,
 ):
+        # /chat_stream:
+    if INDEX.is_empty():
+        async def no_docs():
+            yield {"event": "token", "data": "Please upload a PDF first. I don't have any documents to search yet."}
+            yield {"event": "done", "data": '{"citations": []}'}
+        return EventSourceResponse(no_docs())
     """
     Server-Sent Events stream:
       - event: 'token'  data: <string token>
       - event: 'done'   data: {"citations":[...]}
     """
     qemb = embed_texts([question])[0]
-    hits = INDEX.search(qemb, k=max(50, top_k))
-    hits = _filter_hits_by_doc(hits, doc_id, top_k)
+    hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
+    doc_id = getattr(payload, "doc_id", None) if hasattr(payload, "doc_id") else None
+    hits = _filter_hits_by_doc(hits, doc_id, 50)  # keep wider pool first
+    hits = mmr_rerank(payload.question if hasattr(payload, "question") else question, hits, top_k=payload.top_k if hasattr(payload, "top_k") else top_k)
 
     if not hits or hits[0].get("score", 0) < 0.05:
         async def no_context_stream():

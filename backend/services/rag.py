@@ -28,13 +28,29 @@ def _context_from_chunks(chunks: List[Dict], limit: int) -> str:
         )
     return "\n\n".join(parts)
 
-def build_messages(question: str, retrieved: List[Dict]) -> list[dict]:
-    context = _context_from_chunks(retrieved, _settings.max_context_chunks)
-    user_msg = f"Question: {question}\n\nContext:\n{context}\n\nAnswer:"
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
-    ]
+def build_messages(question: str, hits: list[dict]) -> list[dict]:
+    """
+    Include minimal, relevant chunks with citations. Encourage grounded answers.
+    """
+    context_blocks = []
+    for h in hits:
+        title = h.get("title") or ""
+        page = h.get("page")
+        txt = h.get("text", "")
+        tag = f"{h.get('doc_id','')}:p{page}"
+        header = f"[{title}] ({tag})" if title else f"({tag})"
+        context_blocks.append(f"{header}\n{txt}")
+
+    context = "\n\n".join(context_blocks)
+
+    system = (
+        "You are an assistant that answers ONLY using the provided context.\n"
+        "• Cite sources inline as (doc_id:page) right after the sentence.\n"
+        "• If the answer is not in context, reply: “I don’t know based on the provided documents.”\n"
+        "• Be concise and specific."
+    )
+    user = f"Question: {question}\n\nContext:\n{context}\n\nAnswer:"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 def citations_from(retrieved: List[Dict]) -> List[Dict]:
     return [
