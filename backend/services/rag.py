@@ -1,6 +1,7 @@
 from typing import List, Dict
 from openai import OpenAI
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import time
 
 # ---- Settings ----
 class Settings(BaseSettings):
@@ -18,7 +19,20 @@ SYSTEM_PROMPT = (
     "If the answer is not in the context, say you don't know. "
     "Cite sources as (doc_id:page). Keep answers concise."
 )
-
+def _retry(n=2, wait=1.0):
+    def deco(fn):
+        def wrap(*a, **k):
+            last = None
+            for i in range(n+1):
+                try:
+                    return fn(*a, **k)
+                except Exception as e:
+                    last = e
+                    if i < n:
+                        time.sleep(wait)
+            raise last
+        return wrap
+    return deco
 # ---- Utilities shared by both non-streaming and streaming ----
 def _context_from_chunks(chunks: List[Dict], limit: int) -> str:
     parts = []
@@ -59,6 +73,7 @@ def citations_from(retrieved: List[Dict]) -> List[Dict]:
     ]
 
 # ---- Non-streaming RAG (used by /chat) ----
+@_retry(n=2, wait=1.0)
 def ask_llm(question: str, retrieved: List[Dict]) -> Dict:
     messages = build_messages(question, retrieved)
     resp = _client.chat.completions.create(
@@ -70,6 +85,7 @@ def ask_llm(question: str, retrieved: List[Dict]) -> Dict:
     return {"answer": answer, "citations": citations_from(retrieved)}
 
 # ---- Streaming RAG (used by /chat_stream) ----
+@_retry(n=2, wait=1.0)
 def stream_openai(messages: list[dict]):
     """Yield token deltas from OpenAI stream=True API."""
     stream = _client.chat.completions.create(

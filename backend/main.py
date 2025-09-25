@@ -5,10 +5,11 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
-from services.rerank import mmr_rerank
+
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from starlette.requests import Request
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sse_starlette.sse import EventSourceResponse
@@ -21,6 +22,7 @@ from models.schemas import UploadResponse, AskRequest, AskResult
 from models.schemas import ChatRequest, ChatResult
 from services.rag import ask_llm, build_messages, stream_openai, citations_from
 from services.docmeta import DocMetaStore
+from services.rerank import mmr_rerank
 
 log = logging.getLogger("uvicorn.error")
 
@@ -30,7 +32,6 @@ class Settings(BaseSettings):
     index_dir: str = "./data/index"
     upload_dir: str = "./data/uploads"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
 
 settings = Settings()
 emb_settings = EmbSettings()
@@ -55,37 +56,40 @@ app.add_middleware(
 INDEX = FaissStore(settings.index_dir)
 app.mount("/files", StaticFiles(directory=settings.upload_dir), name="files")
 
-
 # ─────────────────── Helpers ───────────────────
 def _filter_hits_by_doc(
     hits: list[Dict[str, Any]], doc_id: str | None, top_k: int
 ) -> list[Dict[str, Any]]:
-    """
-    Retrieve wider (already done by caller), optionally filter by doc_id, and trim to top_k.
-    """
+    """Optionally filter by doc_id, then trim to top_k."""
     if doc_id:
         hits = [h for h in hits if h.get("doc_id") == doc_id]
     return hits[:top_k]
 
+@app.exception_handler(Exception)
+async def all_errors(_, exc: Exception):
+    # Log stack, return friendly message
+    log.exception("Unhandled error")
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "code": "SERVER_ERROR", "message": "Something went wrong. Try again."},
+    )
 
 # ─────────────────── Routes ───────────────────
 @app.get("/health")
 def health():
     return {"ok": True}
 
-
 @app.get("/hello")
 def hello():
     return {"message": "Backend is running!"}
 
-
 @app.post("/upload", response_model=UploadResponse)
 async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    # 0) quick sanity
+    # 0) sanity
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    # 1) stream to disk (no await file.read())
+    # 1) stream to disk
     doc_id = str(uuid.uuid4())
     updir = Path(settings.upload_dir)
     updir.mkdir(parents=True, exist_ok=True)
@@ -94,18 +98,18 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
     log.info(f"[UPLOAD] start: {file.filename} -> {dest}")
     try:
         with dest.open("wb") as out:
-            shutil.copyfileobj(file.file, out)  # stream to disk
+            shutil.copyfileobj(file.file, out)
     except Exception:
         log.exception("Failed to save uploaded file")
         raise HTTPException(status_code=500, detail="Failed to save file")
 
-    # 1.5) write provisional metadata immediately so it appears in /docs
+    # 1.5) provisional metadata so it shows up in /documents immediately
     try:
         META.add(doc_id, file.filename, pages=0)
     except Exception:
         log.exception(f"[META] provisional add failed for {doc_id}")
 
-    # 2) index asynchronously (do NOT do heavy work inline)
+    # 2) index asynchronously
     def _index_pdf():
         try:
             log.info(f"[INDEX] begin: {doc_id}")
@@ -143,28 +147,24 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
             return 0
 
     background_tasks.add_task(_index_pdf)
-
-    # 3) return immediately
     log.info(f"[UPLOAD] ok: {doc_id}")
     return {"doc_id": doc_id, "chunks": 0}
-
 
 # ───────────── Ask (retrieve only) ─────────────
 @app.post("/ask", response_model=AskResult)
 async def ask(payload: AskRequest):
-    if INDEX.is_empty():
-        # /ask:
+    # empty index → no results
+    if hasattr(INDEX, "is_empty") and INDEX.is_empty():
         return {"results": []}
-    """
-    Accepts optional payload.doc_id to limit hits to a single PDF.
-    """
+
+    doc_id = getattr(payload, "doc_id", None)
+    if doc_id and hasattr(INDEX, "count") and INDEX.count(doc_id) == 0:
+        return {"results": []}  # still indexing that PDF
+
     qemb = embed_texts([payload.question])[0]
-    # retrieve wider, then filter & trim
     hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
-    doc_id = getattr(payload, "doc_id", None) if hasattr(payload, "doc_id") else None
-    # or for chat_stream use the function param doc_id
-    hits = _filter_hits_by_doc(hits, doc_id, 50)  # keep wider pool first
-    hits = mmr_rerank(payload.question if hasattr(payload, "question") else question, hits, top_k=payload.top_k if hasattr(payload, "top_k") else top_k)
+    hits = _filter_hits_by_doc(hits, doc_id, 50)
+    hits = mmr_rerank(payload.question, hits, top_k=payload.top_k)
 
     # Trim text for frontend display
     for h in hits:
@@ -172,28 +172,25 @@ async def ask(payload: AskRequest):
 
     return {"results": hits}
 
-
 # ───────────── Chat (non-streaming) ─────────────
 @app.post("/chat", response_model=ChatResult)
 async def chat(payload: ChatRequest):
-        # /chat:
-    if INDEX.is_empty():
+    if hasattr(INDEX, "is_empty") and INDEX.is_empty():
         return {"answer": "Please upload a PDF first. I don't have any documents to search yet.", "citations": []}
-    """
-    Accepts optional payload.doc_id to limit hits to a single PDF.
-    """
+
+    doc_id = getattr(payload, "doc_id", None)
+    if doc_id and hasattr(INDEX, "count") and INDEX.count(doc_id) == 0:
+        return {"answer": "Still indexing that PDF. Try again in a few seconds.", "citations": []}
+
     qemb = embed_texts([payload.question])[0]
     hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
-    doc_id = getattr(payload, "doc_id", None) if hasattr(payload, "doc_id") else None
-    # or for chat_stream use the function param doc_id
-    hits = _filter_hits_by_doc(hits, doc_id, 50)  # keep wider pool first
-    hits = mmr_rerank(payload.question if hasattr(payload, "question") else question, hits, top_k=payload.top_k if hasattr(payload, "top_k") else top_k)
+    hits = _filter_hits_by_doc(hits, doc_id, 50)
+    hits = mmr_rerank(payload.question, hits, top_k=payload.top_k)
 
-    if not hits or hits[0].get("score", 0) < 0.05:  # simple low-confidence guard
+    if not hits or hits[0].get("score", 0) < 0.05:
         return {"answer": "I don't know. I couldn't find enough supporting context.", "citations": []}
 
     return ask_llm(payload.question, hits)
-
 
 # ───────────── Chat (streaming SSE) ─────────────
 @app.get("/chat_stream")
@@ -203,22 +200,25 @@ async def chat_stream(
     top_k: int = 5,
     doc_id: str | None = None,
 ):
-        # /chat_stream:
-    if INDEX.is_empty():
+    # guards
+    if hasattr(INDEX, "is_empty") and INDEX.is_empty():
         async def no_docs():
             yield {"event": "token", "data": "Please upload a PDF first. I don't have any documents to search yet."}
             yield {"event": "done", "data": '{"citations": []}'}
         return EventSourceResponse(no_docs())
-    """
-    Server-Sent Events stream:
-      - event: 'token'  data: <string token>
-      - event: 'done'   data: {"citations":[...]}
-    """
+
+    if doc_id and hasattr(INDEX, "count") and INDEX.count(doc_id) == 0:
+        async def indexing_stream():
+            yield {"event": "token", "data": "Still indexing that PDF. "}
+            yield {"event": "token", "data": "Try again in a few seconds."}
+            yield {"event": "done", "data": '{"citations": []}'}
+        return EventSourceResponse(indexing_stream())
+
+    # retrieve → rerank
     qemb = embed_texts([question])[0]
-    hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
-    doc_id = getattr(payload, "doc_id", None) if hasattr(payload, "doc_id") else None
-    hits = _filter_hits_by_doc(hits, doc_id, 50)  # keep wider pool first
-    hits = mmr_rerank(payload.question if hasattr(payload, "question") else question, hits, top_k=payload.top_k if hasattr(payload, "top_k") else top_k)
+    hits = INDEX.search(qemb, k=max(50, top_k * 3))
+    hits = _filter_hits_by_doc(hits, doc_id, 50)
+    hits = mmr_rerank(question, hits, top_k=top_k)
 
     if not hits or hits[0].get("score", 0) < 0.05:
         async def no_context_stream():
@@ -237,7 +237,6 @@ async def chat_stream(
         yield {"event": "done", "data": cits_json}
 
     return EventSourceResponse(event_generator())
-
 
 # ───────────── Documents: list & delete ─────────────
 @app.get("/documents")
@@ -272,11 +271,11 @@ def list_docs():
             "filename": m.get("filename") or p.name,
             "pages": int(m.get("pages") or 0),
             "uploaded_at": ts,
+            "title": m.get("title"),
         })
 
     docs.sort(key=lambda d: d.get("uploaded_at") or "", reverse=True)
     return {"docs": docs}
-
 
 @app.delete("/documents/{doc_id}")
 def delete_doc(doc_id: str):

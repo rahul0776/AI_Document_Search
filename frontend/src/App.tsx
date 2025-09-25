@@ -1,18 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
-import { uploadPdf, chat, chatStream } from "./lib/api";
+import { uploadPdf, chat, chatStream, Citation } from "./lib/api";
 import DocLibrary from "./components/DocLibrary";
 import Toast from "./components/Toast";
 import PdfPanel from "./components/PdfPanel";
 
-type Retrieved = {
-  text: string;
-  page: number;
-  doc_id: string;
-  score: number;
-};
-
-type Citation = { doc_id: string; page: number; excerpt: string };
-
+/* ───────────── UI bits ───────────── */
 function Chip({ children, title }: { children: React.ReactNode; title?: string }) {
   return (
     <span title={title} className="text-xs bg-gray-100 border rounded px-2 py-1 whitespace-nowrap">
@@ -20,11 +12,9 @@ function Chip({ children, title }: { children: React.ReactNode; title?: string }
     </span>
   );
 }
-
 function copyToClipboard(text: string) {
   navigator.clipboard?.writeText(text).catch(() => {});
 }
-
 function downloadJSON(filename: string, obj: any) {
   const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -35,6 +25,21 @@ function downloadJSON(filename: string, obj: any) {
   URL.revokeObjectURL(url);
 }
 
+/* ───────────── Types ───────────── */
+type QAItem = {
+  id: string;
+  q: string;
+  a: string;
+  citations: Citation[];
+  scopeLabel: string; // "All PDFs" or "This PDF"
+  ts: number;
+};
+
+function scopeLabel(docId: string | null) {
+  return docId ? "This PDF" : "All PDFs";
+}
+
+/* ───────────── App ───────────── */
 export default function App() {
   // current “active” doc id (the one you just uploaded)
   const [docId, setDocId] = useState<string>("");
@@ -47,9 +52,12 @@ export default function App() {
   // ask
   const [question, setQuestion] = useState("");
 
-  // answer + citations (single box, used for both streaming & fallback)
+  // live answer (display box) – we still keep a separate history per request id
   const [answer, setAnswer] = useState<string>("");
   const [cites, setCites] = useState<Citation[]>([]);
+
+  // conversation history (correctly paired Q/A, each with its own id)
+  const [history, setHistory] = useState<QAItem[]>([]);
 
   // streaming control
   const [streaming, setStreaming] = useState(false);
@@ -90,14 +98,28 @@ export default function App() {
 
   /**
    * Single Ask button:
-   * - Try streaming first.
+   * - Try streaming first and append tokens to a *request-scoped* history row.
    * - If streaming errors, gracefully fall back to non-streaming chat().
    */
   async function askSmart() {
     setError(""); setNotice("");
     if (!question.trim()) return;
 
-    // reset output
+    // Freeze values for this request
+    const reqId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : String(Date.now());
+    const q = question;                        // freeze question text
+    const scope = scopeLabel(queryScopeDoc);   // freeze scope label
+
+    // Create a draft history row immediately
+    setHistory((h) => [
+      ...h,
+      { id: reqId, q, a: "", citations: [], scopeLabel: scope, ts: Date.now() },
+    ]);
+
+    // Reset live answer box (optional – history is the source of truth)
     setAnswer("");
     setCites([]);
     setStreaming(true);
@@ -106,27 +128,39 @@ export default function App() {
 
     try {
       closeStreamRef.current = chatStream(
-        question,
+        q,
         5,
-        // onToken
-        (t) => setAnswer((prev) => (prev ? prev + t : t)),
-        // onDone
+        // onToken: append to this row by id
+        (t) => {
+          setAnswer((prev) => (prev ? prev + t : t)); // live box
+          setHistory((h) =>
+            h.map((item) => (item.id === reqId ? { ...item, a: item.a + t } : item))
+          );
+        },
+        // onDone: finalize citations for that row
         (payload) => {
-          setCites(payload.citations || []);
+          const c = payload.citations || [];
+          setCites(c);
+          setHistory((h) =>
+            h.map((item) => (item.id === reqId ? { ...item, citations: c } : item))
+          );
           finished = true;
           setStreaming(false);
         },
-        // onError -> fallback to non-streaming
+        // onError: graceful fallback to non-streaming
         async () => {
-          // stop SSE (in case)
           closeStreamRef.current?.();
           setStreaming(false);
-
           if (!finished) {
             try {
-              const r = await chat(question, 5, queryScopeDoc || undefined);
+              const r = await chat(q, 5, queryScopeDoc || undefined);
               setAnswer(r.answer);
               setCites(r.citations || []);
+              setHistory((h) =>
+                h.map((item) =>
+                  item.id === reqId ? { ...item, a: r.answer, citations: r.citations || [] } : item
+                )
+              );
             } catch (e: any) {
               setError(e?.message || "Chat failed");
             }
@@ -138,9 +172,14 @@ export default function App() {
       // If EventSource creation fails (rare), non-stream fallback
       setStreaming(false);
       try {
-        const r = await chat(question, 5, queryScopeDoc || undefined);
+        const r = await chat(q, 5, queryScopeDoc || undefined);
         setAnswer(r.answer);
         setCites(r.citations || []);
+        setHistory((h) =>
+          h.map((item) =>
+            item.id === reqId ? { ...item, a: r.answer, citations: r.citations || [] } : item
+          )
+        );
       } catch (e: any) {
         setError(e?.message || "Chat failed");
       }
@@ -222,7 +261,7 @@ export default function App() {
           </div>
         </section>
 
-        {/* Single Answer box (used for streaming & fallback) */}
+        {/* Live Answer (also visible while streaming) */}
         {(answer || cites.length > 0 || streaming) && (
           <section className="p-6 bg-white rounded-xl shadow space-y-3">
             <div className="flex items-center justify-between">
@@ -263,6 +302,41 @@ export default function App() {
                 ))}
               </div>
             )}
+          </section>
+        )}
+
+        {/* Previous answers (correctly paired, newest first) */}
+        {history.length > 0 && (
+          <section className="p-6 bg-white rounded-xl shadow space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Previous answers</h2>
+              <div className="flex gap-2">
+                <button
+                  className="text-xs px-2 py-1 rounded border hover:bg-gray-50"
+                  onClick={() =>
+                    copyToClipboard(history.map((h) => `Q: ${h.q}\nA: ${h.a}`).join("\n\n"))
+                  }
+                >
+                  Copy conversation
+                </button>
+                <button
+                  className="text-xs px-2 py-1 rounded border hover:bg-gray-50"
+                  onClick={() => downloadJSON("conversation.json", history)}
+                >
+                  Export conversation
+                </button>
+              </div>
+            </div>
+
+            {[...history].sort((a, b) => b.ts - a.ts).map((item) => (
+              <div key={item.id} className="border rounded p-3 text-sm bg-white">
+                <div className="text-gray-500 mb-1">
+                  {new Date(item.ts).toLocaleString()} · {item.scopeLabel}
+                </div>
+                <div><strong>Q:</strong> {item.q}</div>
+                <div className="mt-1"><strong>A:</strong> {item.a || "…"}</div>
+              </div>
+            ))}
           </section>
         )}
 

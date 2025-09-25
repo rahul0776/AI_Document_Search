@@ -17,6 +17,14 @@ export type Citation = {
   excerpt: string;
 };
 
+export type DocMeta = {
+  doc_id: string;
+  filename: string;
+  pages: number;
+  uploaded_at?: string;
+  title?: string;          // <-- Day 8: optional title from backend
+};
+
 /* ───────────── Upload ───────────── */
 export async function uploadPdf(file: File) {
   const fd = new FormData();
@@ -26,14 +34,13 @@ export async function uploadPdf(file: File) {
   return res.json() as Promise<{ doc_id: string; chunks: number }>;
 }
 
-/* ───────────── Ask (retrieve only) ─────────────
-   Optional docId limits results to a single PDF. */
+/* ───────────── Ask (retrieve only) ───────────── */
 export async function ask(
   question: string,
   top_k = 5,
   docId?: string
 ): Promise<{ results: Retrieved[] }> {
-  const body: any = { question, top_k: top_k };
+  const body: any = { question, top_k };
   if (docId) body.doc_id = docId;
 
   const res = await fetch(`${API_BASE}/ask`, {
@@ -44,10 +51,14 @@ export async function ask(
   if (!res.ok) throw new Error("Ask failed");
   return res.json();
 }
+
+/* ───────────── Docs: list & delete ───────────── */
 export async function listDocs() {
-  const res = await fetch(`${API_BASE}/documents`, { headers: { Accept: "application/json" }});
+  const res = await fetch(`${API_BASE}/documents`, {
+    headers: { Accept: "application/json" },
+  });
   if (!res.ok) throw new Error("Failed to list documents");
-  return res.json() as Promise<{ docs: Array<{ doc_id: string; filename: string; pages: number; uploaded_at?: string }> }>;
+  return res.json() as Promise<{ docs: DocMeta[] }>;
 }
 
 export async function deleteDoc(docId: string) {
@@ -56,15 +67,13 @@ export async function deleteDoc(docId: string) {
   return res.json() as Promise<{ ok: boolean }>;
 }
 
-
-/* ───────────── Chat (non-streaming) ─────────────
-   Optional docId limits results to a single PDF. */
+/* ───────────── Chat (non-streaming) ───────────── */
 export async function chat(
   question: string,
   top_k = 5,
   docId?: string
 ): Promise<{ answer: string; citations: Citation[] }> {
-  const body: any = { question, top_k: top_k };
+  const body: any = { question, top_k };
   if (docId) body.doc_id = docId;
 
   const res = await fetch(`${API_BASE}/chat`, {
@@ -76,8 +85,7 @@ export async function chat(
   return res.json();
 }
 
-/* ───────────── Chat (streaming SSE) ─────────────
-   Optional docId limits results to a single PDF. */
+/* ───────────── Chat (streaming SSE) ───────────── */
 export function chatStream(
   question: string,
   top_k: number,
@@ -115,4 +123,3 @@ export function chatStream(
 
   return () => es.close(); // unsubscribe/close
 }
-export type DocMeta = { doc_id: string; filename: string; pages: number; uploaded_at?: string };

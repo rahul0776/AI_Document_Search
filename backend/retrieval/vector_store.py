@@ -156,3 +156,18 @@ class FaissStore:
             self._vecs = self._vecs[keep_idx, :]
         # persist and rebuild
         self._persist_all()
+    def count(self, doc_id: str | None = None) -> int:
+        if not self.meta_file.exists():
+            return 0
+        metas = self.meta_file.read_text(encoding="utf-8").splitlines()
+        if not doc_id:
+            return len(metas)
+        c = 0
+        for line in metas:
+            try:
+                m = json.loads(line)
+                if m.get("doc_id") == doc_id:
+                    c += 1
+            except Exception:
+                pass
+        return c
