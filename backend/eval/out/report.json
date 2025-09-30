@@ -1,0 +1,26 @@
+{
+  "k": 5,
+  "per_doc_cap": 3,
+  "n_items": 2,
+  "retrieval": {
+    "recall@k_mean": null,
+    "mrr@k_mean": null
+  },
+  "answer": {
+    "contains_mean": 0
+  },
+  "rows": [
+    {
+      "id": "ex1",
+      "recall@k": NaN,
+      "mrr@k": NaN,
+      "contains": false
+    },
+    {
+      "id": "ex2",
+      "recall@k": NaN,
+      "mrr@k": NaN,
+      "contains": false
+    }
+  ]
+}

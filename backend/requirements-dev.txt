@@ -1,0 +1,15 @@
+pytest
+httpx
+tenacity
+python-dotenv
+
+# project deps that tests import
+fastapi
+uvicorn
+pydantic-settings
+sse-starlette
+openai>=1.43
+faiss-cpu
+numpy
+pypdf
+pytest-asyncio

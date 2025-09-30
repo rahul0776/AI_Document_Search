@@ -207,7 +207,7 @@ export default function App() {
       <main className="max-w-5xl mx-auto p-6 space-y-6">
         {/* Document library + scope */}
         <DocLibrary
-          activeDoc={docId}
+          activeDoc={queryScopeDoc || ""}
           refreshKey={docListRefreshKey}
           onSelect={(chosen) => setQueryScopeDoc(chosen)}   // null => all PDFs
           onDeleted={(deletedId) => {

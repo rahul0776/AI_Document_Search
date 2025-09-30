@@ -17,6 +17,9 @@ class FaissStore:
         self._load()
 
     # ---------- private helpers ----------
+    def is_empty(self) -> bool:
+        return self.index is None or getattr(self.index, "ntotal", 0) == 0
+
     def _load(self):
         # metas
         if self.meta_file.exists():

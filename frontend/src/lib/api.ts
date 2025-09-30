@@ -25,6 +25,15 @@ export type DocMeta = {
   title?: string;          // <-- Day 8: optional title from backend
 };
 
+export async function handleJson(res: Response) {
+  if (!res.ok) {
+    let msg = "Request failed";
+    try { const j = await res.json(); msg = j.message || msg; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
 /* ───────────── Upload ───────────── */
 export async function uploadPdf(file: File) {
   const fd = new FormData();

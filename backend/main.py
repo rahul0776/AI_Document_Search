@@ -5,11 +5,12 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
-
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+import os, shutil, tempfile,sys
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sse_starlette.sse import EventSourceResponse
@@ -23,6 +24,9 @@ from models.schemas import ChatRequest, ChatResult
 from services.rag import ask_llm, build_messages, stream_openai, citations_from
 from services.docmeta import DocMetaStore
 from services.rerank import mmr_rerank
+from services.quality import dedupe_hits, cap_per_doc
+from services.telemetry import log_event
+from middleware.ratelimit import limit_uploads, limit_chat
 
 log = logging.getLogger("uvicorn.error")
 
@@ -31,11 +35,27 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:3000"
     index_dir: str = "./data/index"
     upload_dir: str = "./data/uploads"
+    max_pdf_mb: int = 40
+    max_pages: int = 2000
+    openai_timeout_s: int = 45
+    openai_retries: int = 3
+    top_k_default: int = 5
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()
 emb_settings = EmbSettings()
+# --- test isolation: ensure an empty index during pytest import ---
+
+if ("pytest" in sys.modules) or os.getenv("PYTEST_CURRENT_TEST"):
+    test_index_dir = Path(tempfile.gettempdir()) / "rag_test_index"
+    shutil.rmtree(test_index_dir, ignore_errors=True)  # start clean each run
+    settings.index_dir = str(test_index_dir)
+
 META = DocMetaStore(settings.upload_dir)
+if os.getenv("PYTEST_CURRENT_TEST"):
+    test_index_dir = Path(tempfile.gettempdir()) / "rag_test_index"
+    shutil.rmtree(test_index_dir, ignore_errors=True)  # start clean
+    settings.index_dir = str(test_index_dir)
 
 # ─────────────────── FastAPI app ───────────────────
 app = FastAPI()
@@ -74,6 +94,10 @@ async def all_errors(_, exc: Exception):
         content={"ok": False, "code": "SERVER_ERROR", "message": "Something went wrong. Try again."},
     )
 
+@app.exception_handler(RequestValidationError)
+async def bad_request(_, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"ok": False, "code": "BAD_REQUEST", "errors": exc.errors()})
+
 # ─────────────────── Routes ───────────────────
 @app.get("/health")
 def health():
@@ -83,43 +107,60 @@ def health():
 def hello():
     return {"message": "Backend is running!"}
 
+# main.py
+
+from fastapi import HTTPException  # ensure imported once
+
 @app.post("/upload", response_model=UploadResponse)
 async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    # 0) sanity
+    # 0) sanity: only PDF content
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    # 1) stream to disk
+    # 1) ensure upload dir exists
     doc_id = str(uuid.uuid4())
     updir = Path(settings.upload_dir)
-    updir.mkdir(parents=True, exist_ok=True)
-    dest = updir / f"{doc_id}.pdf"
-
-    log.info(f"[UPLOAD] start: {file.filename} -> {dest}")
     try:
+        updir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        log.exception("[UPLOAD] cannot create upload_dir")
+        raise HTTPException(status_code=500, detail="Cannot create upload directory")
+
+    # 2) resolve destination path BEFORE try/except to avoid UnboundLocalError
+    dest = updir / f"{doc_id}.pdf"
+    log.info(f"[UPLOAD] start: name={file.filename} -> {dest}")
+
+    # 3) write file to disk (streamed)
+    try:
+        # some servers hand you a SpooledTemporaryFile; seek to start just in case
+        try:
+            file.file.seek(0)
+        except Exception:
+            pass
         with dest.open("wb") as out:
             shutil.copyfileobj(file.file, out)
     except Exception:
-        log.exception("Failed to save uploaded file")
+        log.exception("[UPLOAD] failed while writing file")
         raise HTTPException(status_code=500, detail="Failed to save file")
 
-    # 1.5) provisional metadata so it shows up in /documents immediately
+    # 3.5) provisional metadata so it appears in /documents immediately
     try:
         META.add(doc_id, file.filename, pages=0)
     except Exception:
         log.exception(f"[META] provisional add failed for {doc_id}")
 
-    # 2) index asynchronously
-    def _index_pdf():
+    # 4) index asynchronously
+    def _index_pdf(doc_id=doc_id, dest_path=str(dest), orig_name=file.filename):
         try:
             log.info(f"[INDEX] begin: {doc_id}")
-            pages = extract_pdf_text(str(dest))
+            pages = extract_pdf_text(dest_path)
+
+            # title + smarter chunking
             from ingestion.pdf_text import guess_title
             from ingestion.chunker import smart_chunk_pages
-
-            title = guess_title(pages) or file.filename.rsplit(".", 1)[0]
+            title = guess_title(pages) or orig_name.rsplit(".", 1)[0]
             try:
-                META.add(doc_id, file.filename, pages=len(pages), title=title)
+                META.add(doc_id, orig_name, pages=len(pages), title=title)
             except Exception:
                 pass
 
@@ -131,12 +172,7 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
             texts = [c["text"] for c in chunks]
             embs = embed_texts(texts, model=emb_settings.embed_model)
             metas = [
-                {
-                    "text": c["text"][:1000],
-                    "page": c["page"],
-                    "doc_id": doc_id,
-                    "title": title,
-                }
+                {"text": c["text"][:1000], "page": c["page"], "doc_id": doc_id, "title": title}
                 for c in chunks
             ]
             INDEX.upsert(embs, metas)
@@ -147,8 +183,11 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
             return 0
 
     background_tasks.add_task(_index_pdf)
+
+    # 5) success response
     log.info(f"[UPLOAD] ok: {doc_id}")
     return {"doc_id": doc_id, "chunks": 0}
+
 
 # ───────────── Ask (retrieve only) ─────────────
 @app.post("/ask", response_model=AskResult)
@@ -164,8 +203,27 @@ async def ask(payload: AskRequest):
     qemb = embed_texts([payload.question])[0]
     hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
     hits = _filter_hits_by_doc(hits, doc_id, 50)
+    doc_id = getattr(payload, "doc_id", None) if hasattr(payload, "doc_id") else None
+    hits = _filter_hits_by_doc(hits, doc_id, 50)
+
+    # Day 10 hygiene:
+    hits = dedupe_hits(hits)
+    max_per_doc = int(os.getenv("MAX_CHUNKS_PER_DOC", "3"))
+    hits = cap_per_doc(hits, per_doc=max_per_doc)
+
+    # (keep your existing MMR step)
     hits = mmr_rerank(payload.question, hits, top_k=payload.top_k)
 
+    # Telemetry:
+    try:
+        log_event("ask", {
+            "q": payload.question,
+            "scope": doc_id or "ALL",
+            "retrieved": [{"doc_id": h.get("doc_id"), "page": h.get("page"), "score": h.get("score")} for h in hits[:payload.top_k]],
+            "n": len(hits)
+        })
+    except Exception:
+        pass
     # Trim text for frontend display
     for h in hits:
         h["text"] = (h.get("text") or "")[:400]
@@ -173,7 +231,7 @@ async def ask(payload: AskRequest):
     return {"results": hits}
 
 # ───────────── Chat (non-streaming) ─────────────
-@app.post("/chat", response_model=ChatResult)
+@app.post("/chat", dependencies=[Depends(limit_chat)])
 async def chat(payload: ChatRequest):
     if hasattr(INDEX, "is_empty") and INDEX.is_empty():
         return {"answer": "Please upload a PDF first. I don't have any documents to search yet.", "citations": []}
@@ -189,11 +247,27 @@ async def chat(payload: ChatRequest):
 
     if not hits or hits[0].get("score", 0) < 0.05:
         return {"answer": "I don't know. I couldn't find enough supporting context.", "citations": []}
+    doc_id = getattr(payload, "doc_id", None) if hasattr(payload, "doc_id") else None
 
+    hits = _filter_hits_by_doc(hits, doc_id, 50)
+    hits = dedupe_hits(hits)
+    max_per_doc = int(os.getenv("MAX_CHUNKS_PER_DOC", "3"))
+    hits = cap_per_doc(hits, per_doc=max_per_doc)
+    hits = mmr_rerank(payload.question, hits, top_k=payload.top_k)
+
+    try:
+        log_event("chat", {
+            "q": payload.question,
+            "scope": doc_id or "ALL",
+            "n": len(hits),
+            "top_ids": [(h.get("doc_id"), h.get("page")) for h in hits[:payload.top_k]]
+        })
+    except Exception:
+        pass
     return ask_llm(payload.question, hits)
 
 # ───────────── Chat (streaming SSE) ─────────────
-@app.get("/chat_stream")
+@app.get("/chat_stream",dependencies=[Depends(limit_chat)])
 async def chat_stream(
     request: Request,
     question: str,
@@ -218,7 +292,20 @@ async def chat_stream(
     qemb = embed_texts([question])[0]
     hits = INDEX.search(qemb, k=max(50, top_k * 3))
     hits = _filter_hits_by_doc(hits, doc_id, 50)
+    hits = dedupe_hits(hits)
+    max_per_doc = int(os.getenv("MAX_CHUNKS_PER_DOC", "3"))
+    hits = cap_per_doc(hits, per_doc=max_per_doc)
     hits = mmr_rerank(question, hits, top_k=top_k)
+
+    try:
+        log_event("chat_stream", {
+            "q": question,
+            "scope": doc_id or "ALL",
+            "n": len(hits),
+            "top_ids": [(h.get("doc_id"), h.get("page")) for h in hits[:top_k]]
+        })
+    except Exception:
+        pass
 
     if not hits or hits[0].get("score", 0) < 0.05:
         async def no_context_stream():

@@ -1,93 +1,127 @@
-from typing import List, Dict
-from openai import OpenAI
-from pydantic_settings import BaseSettings, SettingsConfigDict
-import time
+# backend/services/rag.py
+from __future__ import annotations
 
-# ---- Settings ----
+from typing import List, Dict, Iterable
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from openai import OpenAI, APIConnectionError, RateLimitError, APIStatusError
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+
+# ─────────────────── Settings ───────────────────
 class Settings(BaseSettings):
     openai_api_key: str
     chat_model: str = "gpt-4o-mini"
+
+    # How many retrieved chunks to expose as citations in the UI
     max_context_chunks: int = 3
-    # allow extra env vars (e.g., EMBED_MODEL, INDEX_DIR, etc.)
+
+    # Hard cap on total context characters sent to the LLM
+    max_context_chars: int = 8000
+
+    # Robustness knobs
+    openai_timeout_s: int = 45
+    openai_retries: int = 3
+
+    # allow extra env vars (EMBED_MODEL, INDEX_DIR, etc.)
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+
 _settings = Settings()
-_client = OpenAI(api_key=_settings.openai_api_key)
+
+# OpenAI client with request timeout
+_client = OpenAI(api_key=_settings.openai_api_key, timeout=_settings.openai_timeout_s)
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant that answers ONLY using the provided context. "
-    "If the answer is not in the context, say you don't know. "
-    "Cite sources as (doc_id:page). Keep answers concise."
+    "If the answer is not in the context, reply: “I don’t know based on the provided documents.” "
+    "Cite sources inline as (doc_id:page) right after the relevant sentence. "
+    "Be concise and specific."
 )
-def _retry(n=2, wait=1.0):
-    def deco(fn):
-        def wrap(*a, **k):
-            last = None
-            for i in range(n+1):
-                try:
-                    return fn(*a, **k)
-                except Exception as e:
-                    last = e
-                    if i < n:
-                        time.sleep(wait)
-            raise last
-        return wrap
-    return deco
-# ---- Utilities shared by both non-streaming and streaming ----
-def _context_from_chunks(chunks: List[Dict], limit: int) -> str:
-    parts = []
-    for i, c in enumerate(chunks[:limit], 1):
-        parts.append(
-            f"[CHUNK {i}] (doc_id={c.get('doc_id')}, page={c.get('page')})\n{c.get('text','')}"
-        )
-    return "\n\n".join(parts)
 
-def build_messages(question: str, hits: list[dict]) -> list[dict]:
+# ─────────────────── Prompt construction ───────────────────
+def build_messages(question: str, hits: List[Dict]) -> List[Dict[str, str]]:
     """
-    Include minimal, relevant chunks with citations. Encourage grounded answers.
+    Build a compact, grounded prompt:
+    - Prefix each chunk with a tag including short doc_id and page.
+    - Enforce a soft char budget across chunks to avoid overly long prompts.
     """
-    context_blocks = []
+    parts: List[str] = []
+    used = 0
+    budget = max(1000, int(_settings.max_context_chars))  # safety lower bound
+
     for h in hits:
+        txt = (h.get("text") or "").strip()
+        if not txt:
+            continue
+
         title = h.get("title") or ""
         page = h.get("page")
-        txt = h.get("text", "")
-        tag = f"{h.get('doc_id','')}:p{page}"
+        doc_id = h.get("doc_id", "")
+        tag = f"{doc_id[:8]}:p{page}"
         header = f"[{title}] ({tag})" if title else f"({tag})"
-        context_blocks.append(f"{header}\n{txt}")
 
-    context = "\n\n".join(context_blocks)
+        remaining = budget - used
+        if remaining <= 0:
+            break
+        if len(txt) > remaining:
+            txt = txt[:remaining]
 
-    system = (
-        "You are an assistant that answers ONLY using the provided context.\n"
-        "• Cite sources inline as (doc_id:page) right after the sentence.\n"
-        "• If the answer is not in context, reply: “I don’t know based on the provided documents.”\n"
-        "• Be concise and specific."
-    )
-    user = f"Question: {question}\n\nContext:\n{context}\n\nAnswer:"
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        parts.append(f"{header}\n{txt}")
+        used += len(txt)
 
-def citations_from(retrieved: List[Dict]) -> List[Dict]:
+        if used >= budget:
+            break
+
+    context = "\n\n---\n\n".join(parts) if parts else "(no context)"
+
     return [
-        {"doc_id": c["doc_id"], "page": c["page"], "excerpt": (c.get("text") or "")[:240]}
-        for c in retrieved[:_settings.max_context_chunks]
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": f"Question:\n{question}\n\nContext:\n{context}\n\nAnswer:",
+        },
     ]
 
-# ---- Non-streaming RAG (used by /chat) ----
-@_retry(n=2, wait=1.0)
-def ask_llm(question: str, retrieved: List[Dict]) -> Dict:
-    messages = build_messages(question, retrieved)
+
+def citations_from(retrieved: List[Dict]) -> List[Dict]:
+    """
+    Take the first N retrieved items and expose minimal citation metadata for the UI.
+    """
+    out: List[Dict] = []
+    for c in retrieved[: max(1, _settings.max_context_chunks)]:
+        out.append(
+            {
+                "doc_id": c.get("doc_id", ""),
+                "page": int(c.get("page", 0)),
+                "excerpt": (c.get("text") or "")[:240],
+            }
+        )
+    return out
+
+
+# ─────────────────── OpenAI calls (with retries) ───────────────────
+@retry(
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(max(1, _settings.openai_retries)),
+    retry=retry_if_exception_type((APIConnectionError, RateLimitError, APIStatusError)),
+    reraise=True,
+)
+def _chat(messages: List[Dict[str, str]]) -> str:
+    """
+    Non-streaming chat completion with retry on transient OpenAI errors.
+    """
     resp = _client.chat.completions.create(
         model=_settings.chat_model,
         messages=messages,
         temperature=0.2,
     )
-    answer = resp.choices[0].message.content.strip()
-    return {"answer": answer, "citations": citations_from(retrieved)}
+    return (resp.choices[0].message.content or "").strip()
 
-# ---- Streaming RAG (used by /chat_stream) ----
-@_retry(n=2, wait=1.0)
-def stream_openai(messages: list[dict]):
-    """Yield token deltas from OpenAI stream=True API."""
+
+def stream_openai(messages: List[Dict[str, str]]) -> Iterable[str]:
+    """
+    Streaming generator (no retries mid-stream; caller can decide fallback).
+    Yields token deltas as strings.
+    """
     stream = _client.chat.completions.create(
         model=_settings.chat_model,
         messages=messages,
@@ -95,6 +129,16 @@ def stream_openai(messages: list[dict]):
         stream=True,
     )
     for chunk in stream:
-        delta = chunk.choices[0].delta.content or ""
-        if delta:
-            yield delta
+        piece = chunk.choices[0].delta.content or ""
+        if piece:
+            yield piece
+
+
+# ─────────────────── Public RAG helpers ───────────────────
+def ask_llm(question: str, retrieved: List[Dict]) -> Dict:
+    """
+    Build messages, call OpenAI (with retries), and return the answer + citations.
+    """
+    messages = build_messages(question, retrieved)
+    answer = _chat(messages)
+    return {"answer": answer, "citations": citations_from(retrieved)}
