@@ -3,6 +3,20 @@
 export const API_BASE =
   process.env.REACT_APP_API_BASE || "http://localhost:8000";
 
+/** Read auth token from localStorage (swap with Clerk/Auth0 later) */
+function getToken(): string | null {
+  return localStorage.getItem("token");
+}
+
+/** Common headers with optional Authorization */
+function authHeaders(extra?: Record<string, string>) {
+  const token = getToken();
+  return {
+    ...(extra || {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
 /* ───────────── Types ───────────── */
 export type Retrieved = {
   text: string;
@@ -22,13 +36,19 @@ export type DocMeta = {
   filename: string;
   pages: number;
   uploaded_at?: string;
-  title?: string;          // <-- Day 8: optional title from backend
+  title?: string; // Day 8+
 };
 
+/* ───────────── Helpers ───────────── */
 export async function handleJson(res: Response) {
   if (!res.ok) {
     let msg = "Request failed";
-    try { const j = await res.json(); msg = j.message || msg; } catch {}
+    try {
+      const j = await res.json();
+      msg = j.message || j.detail || msg;
+    } catch {
+      // ignore parse errors
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -38,9 +58,13 @@ export async function handleJson(res: Response) {
 export async function uploadPdf(file: File) {
   const fd = new FormData();
   fd.append("file", file);
-  const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: fd });
-  if (!res.ok) throw new Error("Upload failed");
-  return res.json() as Promise<{ doc_id: string; chunks: number }>;
+
+  const res = await fetch(`${API_BASE}/upload`, {
+    method: "POST",
+    headers: authHeaders(), // include Authorization if present
+    body: fd,
+  });
+  return handleJson(res) as Promise<{ doc_id: string; chunks: number }>;
 }
 
 /* ───────────── Ask (retrieve only) ───────────── */
@@ -54,26 +78,26 @@ export async function ask(
 
   const res = await fetch(`${API_BASE}/ask`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error("Ask failed");
-  return res.json();
+  return handleJson(res);
 }
 
 /* ───────────── Docs: list & delete ───────────── */
 export async function listDocs() {
   const res = await fetch(`${API_BASE}/documents`, {
-    headers: { Accept: "application/json" },
+    headers: authHeaders({ Accept: "application/json" }),
   });
-  if (!res.ok) throw new Error("Failed to list documents");
-  return res.json() as Promise<{ docs: DocMeta[] }>;
+  return handleJson(res) as Promise<{ docs: DocMeta[] }>;
 }
 
 export async function deleteDoc(docId: string) {
-  const res = await fetch(`${API_BASE}/documents/${docId}`, { method: "DELETE" });
-  if (!res.ok) throw new Error("Failed to delete document");
-  return res.json() as Promise<{ ok: boolean }>;
+  const res = await fetch(`${API_BASE}/documents/${docId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  return handleJson(res) as Promise<{ ok: boolean }>;
 }
 
 /* ───────────── Chat (non-streaming) ───────────── */
@@ -87,14 +111,15 @@ export async function chat(
 
   const res = await fetch(`${API_BASE}/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error("Chat failed");
-  return res.json();
+  return handleJson(res);
 }
 
-/* ───────────── Chat (streaming SSE) ───────────── */
+/* ───────────── Chat (streaming SSE) ─────────────
+   NOTE: EventSource cannot set custom headers. We pass the token
+   as a query param so the backend can authenticate the stream. */
 export function chatStream(
   question: string,
   top_k: number,
@@ -107,6 +132,10 @@ export function chatStream(
   url.searchParams.set("question", question);
   url.searchParams.set("top_k", String(top_k));
   if (docId) url.searchParams.set("doc_id", docId);
+
+  // Day 11: attach token as query param for SSE auth
+  const token = getToken();
+  if (token) url.searchParams.set("token", token);
 
   const es = new EventSource(url.toString());
 
