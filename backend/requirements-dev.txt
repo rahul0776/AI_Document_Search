@@ -13,3 +13,4 @@ faiss-cpu
 numpy
 pypdf
 pytest-asyncio
+PyJWT==2.8.0

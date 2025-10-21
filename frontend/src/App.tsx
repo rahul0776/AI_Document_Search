@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { uploadPdf, chat, chatStream, Citation } from "./lib/api";
+import { uploadPdf, chat, chatStream, Citation, devLogin, getMe } from "./lib/api";
 import DocLibrary from "./components/DocLibrary";
 import Toast from "./components/Toast";
 import PdfPanel from "./components/PdfPanel";
@@ -41,6 +41,12 @@ function scopeLabel(docId: string | null) {
 
 /* ───────────── App ───────────── */
 export default function App() {
+  // Auth/session
+  const [me, setMe] = useState<{ user_id: string; email?: string } | null>(null);
+  const [authErr, setAuthErr] = useState("");
+  const [devUid, setDevUid] = useState("demo");
+  const [devEmail, setDevEmail] = useState("");
+
   // current “active” doc id (the one you just uploaded)
   const [docId, setDocId] = useState<string>("");
 
@@ -71,14 +77,36 @@ export default function App() {
   // PDF side panel
   const [showPdf, setShowPdf] = useState<{ docId: string; page: number } | null>(null);
 
+  // Try to restore session on mount
   useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const u = await getMe();
+        if (!cancelled) {
+          setMe(u);
+          setAuthErr("");
+          setDocListRefreshKey((k) => k + 1); // load this user's docs
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setMe(null);
+          setAuthErr(e?.message || "Please sign in.");
+        }
+      }
+    })();
     return () => {
+      cancelled = true;
       // safety: close any open SSE on unmount
       closeStreamRef.current?.();
     };
   }, []);
 
   async function handleUpload(file: File) {
+    if (!me) {
+      setError("Please sign in first.");
+      return;
+    }
     setError(""); setNotice("");
     setAnswer(""); setCites([]);
     setStreaming(false);
@@ -103,6 +131,7 @@ export default function App() {
    */
   async function askSmart() {
     setError(""); setNotice("");
+    if (!me) { setError("Please sign in first."); return; }
     if (!question.trim()) return;
 
     // Freeze values for this request
@@ -198,16 +227,87 @@ export default function App() {
       {notice && <Toast text={notice} tone="success" onClose={() => setNotice("")} />}
 
       <header className="px-6 py-4 border-b bg-white">
-        <div className="max-w-5xl mx-auto flex items-center justify-between">
-          <h1 className="text-2xl font-bold">AI Document Search (RAG)</h1>
-          {docId && <Chip title={docId}>doc {docId.slice(0, 8)}…</Chip>}
+        <div className="max-w-5xl mx-auto flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold">AI Document Search (RAG)</h1>
+            {docId && <Chip title={docId}>doc {docId.slice(0, 8)}…</Chip>}
+          </div>
+
+          {/* Dev sign-in block */}
+          <div className="flex items-center gap-3">
+            {me ? (
+              <>
+                <span className="text-sm text-gray-600">
+                  Signed in as <b>{me.user_id}</b>{me.email ? ` · ${me.email}` : ""}
+                </span>
+                <button
+                  className="text-xs px-2 py-1 rounded border hover:bg-gray-50"
+                  onClick={() => {
+                    localStorage.removeItem("token");
+                    setMe(null);
+                    setAuthErr("Please sign in.");
+                    setDocListRefreshKey((k) => k + 1); // clear docs list
+                    setDocId("");
+                    setQueryScopeDoc(null);
+                    setHistory([]);
+                    setAnswer("");
+                    setCites([]);
+                  }}
+                >
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <form
+                className="flex items-center gap-2"
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  try {
+                    const { token, user } = await devLogin(devUid || "demo", devEmail || undefined);
+                    localStorage.setItem("token", token);
+                    setMe(user);
+                    setAuthErr("");
+                    setDocListRefreshKey((k) => k + 1); // load docs for this user
+                  } catch (err: any) {
+                    setAuthErr(err?.message || "Login failed");
+                  }
+                }}
+              >
+                <input
+                  className="border rounded px-2 py-1 text-sm"
+                  placeholder="user id"
+                  value={devUid}
+                  onChange={(e) => setDevUid(e.target.value)}
+                />
+                <input
+                  className="border rounded px-2 py-1 text-sm"
+                  placeholder="email (opt)"
+                  value={devEmail}
+                  onChange={(e) => setDevEmail(e.target.value)}
+                />
+                <button className="text-xs px-2 py-1 rounded border hover:bg-gray-50" type="submit">
+                  Sign in
+                </button>
+                {authErr && <span className="text-xs text-red-600">{authErr}</span>}
+              </form>
+            )}
+          </div>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto p-6 space-y-6">
+        {/* Signed-out hint */}
+        {!me && (
+          <section className="p-4 bg-yellow-50 border border-yellow-200 rounded">
+            <p className="text-sm text-yellow-900">
+              You’re not signed in. Use the form in the header to sign in (dev mode).
+            </p>
+          </section>
+        )}
+
         {/* Document library + scope */}
         <DocLibrary
-          activeDoc={queryScopeDoc || ""}
+          activeDoc={queryScopeDoc}
           refreshKey={docListRefreshKey}
           onSelect={(chosen) => setQueryScopeDoc(chosen)}   // null => all PDFs
           onDeleted={(deletedId) => {
@@ -220,11 +320,12 @@ export default function App() {
         <section className="p-6 bg-white rounded-xl shadow space-y-3">
           <h2 className="text-xl font-semibold">Upload PDF</h2>
           <div className="flex items-center gap-3">
-            <label className="inline-flex items-center gap-2 cursor-pointer">
+            <label className={`inline-flex items-center gap-2 ${!me ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}>
               <input
                 type="file"
                 accept="application/pdf"
                 className="hidden"
+                disabled={!me}
                 onChange={(e) => {
                   const f = e.target.files?.[0];
                   if (f) handleUpload(f);
@@ -234,6 +335,7 @@ export default function App() {
             </label>
             {busy && <Chip>Working…</Chip>}
           </div>
+          {!me && <p className="text-xs text-gray-500">Sign in to upload documents.</p>}
         </section>
 
         {/* Ask (single button, streams with fallback) */}
@@ -245,10 +347,11 @@ export default function App() {
               placeholder="Ask a question about your PDF(s)…"
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
+              disabled={!me}
             />
             <button
               className="px-4 py-2 rounded bg-indigo-600 text-white disabled:opacity-50"
-              disabled={!question || streaming}
+              disabled={!me || !question || streaming}
               onClick={askSmart}
             >
               Ask
@@ -259,6 +362,7 @@ export default function App() {
               </button>
             )}
           </div>
+          {!me && <p className="text-xs text-gray-500">Sign in to ask questions.</p>}
         </section>
 
         {/* Live Answer (also visible while streaming) */}

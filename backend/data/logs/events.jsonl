@@ -8,3 +8,7 @@
 {"ts": 1759365488.6136553, "kind": "chat_stream", "user": "demo", "q": "What is this pdf about?", "scope": "c2286720-fab4-4d89-9467-733aa3e17771", "n": 3, "top_ids": [["c2286720-fab4-4d89-9467-733aa3e17771", 1], ["c2286720-fab4-4d89-9467-733aa3e17771", 1], ["c2286720-fab4-4d89-9467-733aa3e17771", 1]]}
 {"ts": 1759767385.8020928, "kind": "chat_stream", "user": "demo", "q": "What is this pdf about?", "scope": "2b0c398d-543f-4ad0-9c14-813ab75b50b1", "n": 3}
 {"ts": 1759767415.1477573, "kind": "chat_stream", "user": "demo", "q": "What do the pdfs have in common?", "scope": "ALL", "n": 5}
+{"ts": 1761085431.4042327, "kind": "chat", "user_id": "demo", "q": "What is this pdf about?", "scope": "ALL", "n": 5}
+{"ts": 1761085443.6908615, "kind": "chat", "user_id": "demo", "q": "What is this pdf about?", "scope": "ALL", "n": 5}
+{"ts": 1761085457.5692763, "kind": "chat", "user_id": "demo", "q": "What is this pdf about?", "scope": "ALL", "n": 5}
+{"ts": 1761085482.3294551, "kind": "chat", "user_id": "demo", "q": "What is the pdf about?", "scope": "ALL", "n": 3}

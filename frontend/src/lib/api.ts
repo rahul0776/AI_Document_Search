@@ -1,73 +1,81 @@
-// src/lib/api.ts
+// frontend/src/lib/api.ts
 
 export const API_BASE =
   process.env.REACT_APP_API_BASE || "http://localhost:8000";
 
-/** Read auth token from localStorage (swap with Clerk/Auth0 later) */
-function getToken(): string | null {
-  return localStorage.getItem("token");
+/* ───────────── Shared helpers ───────────── */
+function getToken() {
+  return localStorage.getItem("token") || "";
 }
 
-/** Common headers with optional Authorization */
-function authHeaders(extra?: Record<string, string>) {
-  const token = getToken();
-  return {
-    ...(extra || {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+function withAuthHeaders(init?: RequestInit): Headers {
+  const headers = new Headers(init?.headers as HeadersInit);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const t = getToken();
+  if (t) headers.set("Authorization", `Bearer ${t}`);
+  return headers;
 }
 
-/* ───────────── Types ───────────── */
-export type Retrieved = {
-  text: string;
-  page: number;
-  doc_id: string;
-  score: number;
-};
+async function fetchJson(input: RequestInfo, init?: RequestInit) {
+  const res = await fetch(input, {
+    ...init,
+    headers: withAuthHeaders(init),
+  });
 
-export type Citation = {
-  doc_id: string;
-  page: number;
-  excerpt: string;
-};
-
-export type DocMeta = {
-  doc_id: string;
-  filename: string;
-  pages: number;
-  uploaded_at?: string;
-  title?: string; // Day 8+
-};
-
-/* ───────────── Helpers ───────────── */
-export async function handleJson(res: Response) {
+  if (res.status === 401) {
+    localStorage.removeItem("token");
+    throw new Error("Unauthorized. Please sign in.");
+  }
   if (!res.ok) {
     let msg = "Request failed";
     try {
       const j = await res.json();
-      msg = j.message || j.detail || msg;
-    } catch {
-      // ignore parse errors
-    }
+      msg = j.detail || j.message || msg;
+    } catch {}
     throw new Error(msg);
   }
   return res.json();
 }
 
+/* ───────────── Auth (Day 13) ───────────── */
+export async function devLogin(user_id: string, email?: string) {
+  return fetchJson(`${API_BASE}/auth/dev_login`, {
+    method: "POST",
+    body: JSON.stringify({ user_id, email }),
+  }) as Promise<{ token: string; user: { user_id: string; email?: string } }>;
+}
+
+export async function getMe() {
+  return fetchJson(`${API_BASE}/me`) as Promise<{ user_id: string; email?: string }>;
+}
+
+/* ───────────── Types ───────────── */
+export type Retrieved = { text: string; page: number; doc_id: string; score: number };
+export type Citation  = { doc_id: string; page: number; excerpt: string };
+export type DocMeta   = { doc_id: string; filename: string; pages: number; uploaded_at?: string; title?: string };
+
 /* ───────────── Upload ───────────── */
 export async function uploadPdf(file: File) {
   const fd = new FormData();
   fd.append("file", file);
-
   const res = await fetch(`${API_BASE}/upload`, {
     method: "POST",
-    headers: authHeaders(), // include Authorization if present
     body: fd,
+    headers: (() => {
+      // Auth for multipart: don't set Content-Type manually
+      const t = getToken();
+      return t ? { Authorization: `Bearer ${t}` } : undefined;
+    })(),
   });
-  return handleJson(res) as Promise<{ doc_id: string; chunks: number }>;
+  if (res.status === 401) {
+    localStorage.removeItem("token");
+    throw new Error("Unauthorized. Please sign in.");
+  }
+  if (!res.ok) throw new Error("Upload failed");
+  return res.json() as Promise<{ doc_id: string; chunks: number }>;
 }
 
-/* ───────────── Ask (retrieve only) ───────────── */
+/* ───────────── Ask / Chat ───────────── */
 export async function ask(
   question: string,
   top_k = 5,
@@ -75,32 +83,9 @@ export async function ask(
 ): Promise<{ results: Retrieved[] }> {
   const body: any = { question, top_k };
   if (docId) body.doc_id = docId;
-
-  const res = await fetch(`${API_BASE}/ask`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
-  });
-  return handleJson(res);
+  return fetchJson(`${API_BASE}/ask`, { method: "POST", body: JSON.stringify(body) });
 }
 
-/* ───────────── Docs: list & delete ───────────── */
-export async function listDocs() {
-  const res = await fetch(`${API_BASE}/documents`, {
-    headers: authHeaders({ Accept: "application/json" }),
-  });
-  return handleJson(res) as Promise<{ docs: DocMeta[] }>;
-}
-
-export async function deleteDoc(docId: string) {
-  const res = await fetch(`${API_BASE}/documents/${docId}`, {
-    method: "DELETE",
-    headers: authHeaders(),
-  });
-  return handleJson(res) as Promise<{ ok: boolean }>;
-}
-
-/* ───────────── Chat (non-streaming) ───────────── */
 export async function chat(
   question: string,
   top_k = 5,
@@ -108,18 +93,14 @@ export async function chat(
 ): Promise<{ answer: string; citations: Citation[] }> {
   const body: any = { question, top_k };
   if (docId) body.doc_id = docId;
-
-  const res = await fetch(`${API_BASE}/chat`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
-  });
-  return handleJson(res);
+  return fetchJson(`${API_BASE}/chat`, { method: "POST", body: JSON.stringify(body) });
 }
 
-/* ───────────── Chat (streaming SSE) ─────────────
-   NOTE: EventSource cannot set custom headers. We pass the token
-   as a query param so the backend can authenticate the stream. */
+/**
+ * Streaming chat (SSE).
+ * EventSource can’t send headers; we append `token` as a query param.
+ * Backend should accept either Header Bearer or ?token=… (Day 13 Option A).
+ */
 export function chatStream(
   question: string,
   top_k: number,
@@ -132,32 +113,33 @@ export function chatStream(
   url.searchParams.set("question", question);
   url.searchParams.set("top_k", String(top_k));
   if (docId) url.searchParams.set("doc_id", docId);
-
-  // Day 11: attach token as query param for SSE auth
-  const token = getToken();
-  if (token) url.searchParams.set("token", token);
+  const t = getToken();
+  if (t) url.searchParams.set("token", t); // << add token for SSE
 
   const es = new EventSource(url.toString());
 
-  es.addEventListener("token", (ev: MessageEvent) => {
-    onToken(ev.data);
-  });
-
+  es.addEventListener("token", (ev: MessageEvent) => onToken(ev.data));
   es.addEventListener("done", (ev: MessageEvent) => {
     try {
-      const payload = JSON.parse(ev.data);
-      onDone(payload);
+      onDone(JSON.parse(ev.data));
     } catch {
       onDone({ citations: [] });
     } finally {
       es.close();
     }
   });
-
   es.onerror = (e) => {
     es.close();
     onError?.(e);
   };
+  return () => es.close();
+}
 
-  return () => es.close(); // unsubscribe/close
+/* ───────────── Docs ───────────── */
+export async function listDocs() {
+  return fetchJson(`${API_BASE}/documents`, { method: "GET" }) as Promise<{ docs: DocMeta[] }>;
+}
+
+export async function deleteDoc(docId: string) {
+  return fetchJson(`${API_BASE}/documents/${docId}`, { method: "DELETE" }) as Promise<{ ok: boolean }>;
 }
