@@ -3,6 +3,8 @@ import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import "./index.css";
 import App from "./App";
 import "./pdf.worker";
+import { ThemeProvider } from "./contexts/ThemeContext";
+
 function Upload() {
   return <div className="p-6">Upload page (PDFs go here)</div>;
 }
@@ -17,5 +19,7 @@ const router = createBrowserRouter([
 ]);
 
 createRoot(document.getElementById("root")!).render(
-  <RouterProvider router={router} />
+  <ThemeProvider>
+    <RouterProvider router={router} />
+  </ThemeProvider>
 );

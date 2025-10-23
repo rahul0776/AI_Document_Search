@@ -37,7 +37,21 @@ async function fetchJson(input: RequestInfo, init?: RequestInit) {
   return res.json();
 }
 
-/* ───────────── Auth (Day 13) ───────────── */
+/* ───────────── Auth ───────────── */
+export async function signup(username: string, email: string, password: string) {
+  return fetchJson(`${API_BASE}/auth/signup`, {
+    method: "POST",
+    body: JSON.stringify({ username, email, password }),
+  }) as Promise<{ token: string; user: { user_id: string; email?: string } }>;
+}
+
+export async function login(username: string, password: string) {
+  return fetchJson(`${API_BASE}/auth/login`, {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  }) as Promise<{ token: string; user: { user_id: string; email?: string } }>;
+}
+
 export async function devLogin(user_id: string, email?: string) {
   return fetchJson(`${API_BASE}/auth/dev_login`, {
     method: "POST",
@@ -46,7 +60,35 @@ export async function devLogin(user_id: string, email?: string) {
 }
 
 export async function getMe() {
-  return fetchJson(`${API_BASE}/me`) as Promise<{ user_id: string; email?: string }>;
+  return fetchJson(`${API_BASE}/me`) as Promise<{ user_id: string; email?: string; email_verified?: boolean }>;
+}
+
+export async function verifyEmail(token: string) {
+  return fetchJson(`${API_BASE}/auth/verify-email`, {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  }) as Promise<{ ok: boolean; message: string }>;
+}
+
+export async function resendVerification() {
+  return fetchJson(`${API_BASE}/auth/resend-verification`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  }) as Promise<{ ok: boolean; message: string }>;
+}
+
+export async function forgotPassword(email: string) {
+  return fetchJson(`${API_BASE}/auth/forgot-password`, {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  }) as Promise<{ ok: boolean; message: string }>;
+}
+
+export async function resetPassword(token: string, new_password: string) {
+  return fetchJson(`${API_BASE}/auth/reset-password`, {
+    method: "POST",
+    body: JSON.stringify({ token, new_password }),
+  }) as Promise<{ ok: boolean; message: string }>;
 }
 
 /* ───────────── Types ───────────── */
