@@ -11,6 +11,7 @@ sse-starlette
 openai
 faiss-cpu
 PyPDF2
+PyMuPDF
 numpy
 sendgrid
 rank-bm25
