@@ -65,6 +65,11 @@ class Settings(BaseSettings):
 settings = Settings()
 emb_settings = EmbSettings()
 
+# Create required directories on startup
+os.makedirs(settings.upload_dir, exist_ok=True)
+os.makedirs(settings.index_dir, exist_ok=True)
+os.makedirs("./data/logs", exist_ok=True)
+
 # During tests: isolate index directory
 if ("pytest" in sys.modules) or os.getenv("PYTEST_CURRENT_TEST"):
     test_index_dir = Path(tempfile.gettempdir()) / "rag_test_index"
