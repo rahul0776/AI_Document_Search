@@ -544,7 +544,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 **Rahul Lotlikar**
 - GitHub: [@rahul0776](https://github.com/rahul0776)
 - LinkedIn: [Rahul Lotlikar](https://linkedin.com/in/rahul-lotlikar)
-- Email: lucifert75@gmail.com
+- Email: rahulujv@buffalo.edu
 
 ---
 
@@ -557,31 +557,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Tailwind Labs** - Utility-first CSS framework
 - **SendGrid** - Email delivery infrastructure
 
----
 
-## 💡 Why This Project Stands Out
-
-### **For Hiring Managers:**
-
-This project demonstrates comprehensive skills across the entire software development lifecycle:
-
-1. **Problem Solving** - Addressed complex challenges like streaming auth, background processing, and semantic search optimization
-
-2. **Code Quality** - Clean architecture, type safety, comprehensive testing, well-documented
-
-3. **Production Mindset** - Security best practices, error handling, monitoring, scalability considerations
-
-4. **Modern Stack** - Latest technologies, industry-standard tools, cloud-ready deployment
-
-5. **AI/ML Expertise** - Advanced RAG implementation, not just API calls - understanding of embeddings, vector search, reranking algorithms
-
-6. **Full-Stack Proficiency** - Backend (Python/FastAPI), Frontend (React/TypeScript), DevOps (Docker/Nginx)
-
-7. **User-Centric** - Beautiful UI, dark mode, real-time features, responsive design
-
-8. **Continuous Improvement** - Iterative development, performance optimization, feature roadmap
-
----
 
 <p align="center">
   <b>⭐ If you find this project impressive, please give it a star! ⭐</b>
