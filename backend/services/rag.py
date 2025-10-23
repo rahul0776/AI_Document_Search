@@ -12,10 +12,10 @@ class Settings(BaseSettings):
     chat_model: str = "gpt-4o-mini"
 
     # How many retrieved chunks to expose as citations in the UI
-    max_context_chunks: int = 3
+    max_context_chunks: int = 5
 
     # Hard cap on total context characters sent to the LLM
-    max_context_chars: int = 8000
+    max_context_chars: int = 15000
 
     # Robustness knobs
     openai_timeout_s: int = 45
@@ -31,10 +31,16 @@ _settings = Settings()
 _client = OpenAI(api_key=_settings.openai_api_key, timeout=_settings.openai_timeout_s)
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers ONLY using the provided context. "
-    "If the answer is not in the context, reply: “I don’t know based on the provided documents.” "
-    "Cite sources inline as (doc_id:page) right after the relevant sentence. "
-    "Be concise and specific."
+    "You are an intelligent document assistant. Your role is to provide comprehensive, accurate answers based on the provided context. "
+    "Guidelines:\n"
+    "- Synthesize information from ALL provided context sections to give complete answers\n"
+    "- If multiple parts of the document are relevant, combine them into a coherent response\n"
+    "- Be thorough but clear - don't leave out important details that are in the context\n"
+    "- If the answer requires information from different sections, connect them logically\n"
+    "- Only if the answer is truly not in ANY of the provided context, say: 'I don't have enough information in the provided documents to answer that.'\n"
+    "- Use a conversational, helpful tone\n"
+    "- Format your response with proper paragraphs for readability\n"
+    "- When relevant, include specific details, numbers, or examples from the documents"
 )
 
 # ─────────────────── Prompt construction ───────────────────

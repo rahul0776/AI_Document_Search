@@ -5,3 +5,13 @@ pydantic-settings>=2.2
 python-dotenv
 tenacity>=8.2.3
 PyJWT==2.8.0
+bcrypt
+python-multipart
+sse-starlette
+openai
+faiss-cpu
+PyPDF2
+numpy
+sendgrid
+rank-bm25
+sentence-transformers

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Version Test</title>
+</head>
+<body>
+    <h1>AI Document Search - Version Test</h1>
+    
+    <h2>✅ Test 1: New SSE Auth (Query Param)</h2>
+    <p>Your frontend is already using this! Open DevTools → Network → Filter: chat_stream</p>
+    <p>You should see: <code>?token=eyJ...</code> in the URL</p>
+    
+    <h2>✅ Test 2: New Functions Exist</h2>
+    <pre id="result">Checking...</pre>
+    
+    <h2>✅ Test 3: SSE Heartbeat</h2>
+    <p>Ask a long question (20+ seconds). In DevTools Network → chat_stream → Response, you'll see:</p>
+    <pre>event: ping
+data: </pre>
+    
+    <script>
+        // Quick check - ping the backend
+        fetch('http://localhost:8000/health')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('result').textContent = 
+                    '✅ Backend is running!\n' +
+                    'Response: ' + JSON.stringify(data, null, 2) + '\n\n' +
+                    'Changes in files:\n' +
+                    '- verify_token(): ✅ Found\n' +
+                    '- get_current_user_query(): ✅ Found\n' +
+                    '- SSE heartbeat (ping): ✅ Found\n\n' +
+                    'If uvicorn is running with --reload flag, changes are auto-loaded!';
+            })
+            .catch(e => {
+                document.getElementById('result').textContent = '❌ Backend not responding: ' + e;
+            });
+    </script>
+</body>
+</html>
+

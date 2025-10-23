@@ -5,6 +5,7 @@ import json
 import uuid
 import shutil
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -22,7 +23,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sse_starlette.sse import EventSourceResponse
 
 # ── Auth/user
-from auth import get_current_user, User, issue_token
+from auth import get_current_user, get_current_user_query, User, issue_token
+from services.user_store import get_user_store
+from services.email_service import get_email_service
+from services.token_service import get_token_service
 
 # ── Registries/services
 from services.index_registry import IndexRegistry
@@ -36,6 +40,14 @@ from services.quality import dedupe_hits, cap_per_doc
 from services.telemetry import log_event
 from middleware.ratelimit import limit_chat
 
+# ── Advanced RAG features (Day 5-7)
+from retrieval.hybrid_search import get_hybrid_searcher
+from retrieval.query_expansion import expand_query_simple
+from retrieval.advanced_rerank import get_reranker
+from services.context_optimizer import get_context_optimizer
+from services.rag_evaluator import get_evaluator
+from ingestion.smart_chunker import chunk_documents_smart
+
 log = logging.getLogger("uvicorn.error")
 
 # ─────────────────── Settings ───────────────────
@@ -47,7 +59,7 @@ class Settings(BaseSettings):
     max_pages: int = 2000
     openai_timeout_s: int = 45
     openai_retries: int = 3
-    top_k_default: int = 5
+    top_k_default: int = 10
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()
@@ -106,12 +118,105 @@ async def all_errors(_, exc: Exception):
 async def bad_request(_, exc: RequestValidationError):
     return JSONResponse(status_code=422, content={"ok": False, "code": "BAD_REQUEST", "errors": exc.errors()})
 
-# ─────────────────── Auth (dev) ───────────────────
+# ─────────────────── Auth ───────────────────
+@app.post("/auth/signup")
+def signup(body: Dict[str, Any]):
+    """
+    Create a new user account with email verification.
+    POST {"username": "...", "email": "...", "password": "..."}
+    """
+    if body is None:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    
+    username = (body.get("username") or "").strip()
+    email = (body.get("email") or "").strip()
+    password = body.get("password") or ""
+    
+    # Validation
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    if not password:
+        raise HTTPException(status_code=400, detail="Password is required")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    
+    user_store = get_user_store()
+    
+    if user_store.user_exists(username):
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    # Check if email already used
+    existing_user = user_store.get_user_by_email(email)
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Generate email verification token
+    token_service = get_token_service()
+    verification_token, token_hash, expiry = token_service.create_verification_token()
+    
+    # Create user with verification token
+    success = user_store.create_user(
+        username, 
+        password, 
+        email,
+        verification_token_hash=token_hash,
+        verification_token_expiry=expiry
+    )
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to create user")
+    
+    # Send verification email
+    email_service = get_email_service()
+    email_sent = email_service.send_verification_email(email, username, verification_token)
+    
+    # Issue JWT token (user can use app but should verify email)
+    token = issue_token(user_id=username, email=email, hours=24)
+    
+    return {
+        "token": token, 
+        "user": {"user_id": username, "email": email, "email_verified": False},
+        "message": "Account created! Please check your email to verify your account." if email_sent else "Account created!"
+    }
+
+@app.post("/auth/login")
+def login(body: Dict[str, Any]):
+    """
+    Login with username and password.
+    POST {"username": "...", "password": "..."}
+    """
+    if body is None:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not password:
+        raise HTTPException(status_code=400, detail="Password is required")
+    
+    user_store = get_user_store()
+    user = user_store.verify_user(username, password)
+    
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    token = issue_token(user_id=username, email=user.get("email"), hours=24)
+    return {"token": token, "user": {"user_id": username, "email": user.get("email")}}
+
 @app.post("/auth/dev_login")
 def dev_login(body: Dict[str, Any]):
     """
-    Dev-only endpoint to mint a JWT for quick testing.
+    Dev-only endpoint to mint a JWT for quick testing (bypasses password).
     POST {"user_id": "demo", "email": "demo@example.com"}
+    Only use in development!
     """
     if body is None:
         raise HTTPException(status_code=400, detail="JSON body required")
@@ -124,7 +229,215 @@ def dev_login(body: Dict[str, Any]):
 
 @app.get("/me")
 def me(user: User = Depends(get_current_user)):
-    return {"user_id": user.user_id, "email": user.email}
+    user_store = get_user_store()
+    user_data = user_store.get_user(user.user_id)
+    return {
+        "user_id": user.user_id, 
+        "email": user.email,
+        "email_verified": user_data.get("email_verified", False) if user_data else False
+    }
+
+# ─────────────────── Email Verification ───────────────────
+@app.post("/auth/verify-email")
+def verify_email(body: Dict[str, Any]):
+    """
+    Verify user's email with token from email link.
+    POST {"token": "..."}
+    """
+    if body is None:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    
+    token = body.get("token", "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Verification token is required")
+    
+    token_service = get_token_service()
+    user_store = get_user_store()
+    
+    # Hash the token to find the user
+    token_hash = token_service.hash_token(token)
+    username = user_store.find_user_by_verification_token(token_hash)
+    
+    if not username:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+    
+    # Get token data
+    token_data = user_store.get_verification_token(username)
+    if not token_data or not token_data.get("token_hash"):
+        raise HTTPException(status_code=400, detail="No verification token found")
+    
+    # Verify token
+    is_valid = token_service.verify_token(
+        token, 
+        token_data["token_hash"], 
+        token_data["expiry"]
+    )
+    
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+    
+    # Mark email as verified
+    success = user_store.verify_email(username)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to verify email")
+    
+    # Send welcome email
+    user_data = user_store.get_user(username)
+    if user_data and user_data.get("email"):
+        email_service = get_email_service()
+        email_service.send_welcome_email(user_data["email"], username)
+    
+    return {
+        "ok": True,
+        "message": "Email verified successfully! Welcome to AI Document Search."
+    }
+
+@app.post("/auth/resend-verification")
+def resend_verification(user: User = Depends(get_current_user)):
+    """
+    Resend verification email to current user.
+    Requires authentication.
+    """
+    user_store = get_user_store()
+    user_data = user_store.get_user(user.user_id)
+    
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user_data.get("email_verified"):
+        raise HTTPException(status_code=400, detail="Email already verified")
+    
+    if not user_data.get("email"):
+        raise HTTPException(status_code=400, detail="No email associated with account")
+    
+    # Generate new verification token
+    token_service = get_token_service()
+    verification_token, token_hash, expiry = token_service.create_verification_token()
+    
+    # Update user with new token
+    users = user_store._load_users()
+    users[user.user_id]["verification_token_hash"] = token_hash
+    users[user.user_id]["verification_token_expiry"] = expiry
+    user_store._save_users(users)
+    
+    # Send email
+    email_service = get_email_service()
+    email_sent = email_service.send_verification_email(
+        user_data["email"], 
+        user.user_id, 
+        verification_token
+    )
+    
+    if not email_sent:
+        raise HTTPException(status_code=500, detail="Failed to send verification email")
+    
+    return {
+        "ok": True,
+        "message": "Verification email sent! Please check your inbox."
+    }
+
+# ─────────────────── Password Reset ───────────────────
+@app.post("/auth/forgot-password")
+def forgot_password(body: Dict[str, Any]):
+    """
+    Request password reset email.
+    POST {"email": "..."}
+    """
+    if body is None:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    
+    email = (body.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    
+    user_store = get_user_store()
+    username = user_store.get_user_by_email(email)
+    
+    # Always return success (don't reveal if email exists)
+    if not username:
+        return {
+            "ok": True,
+            "message": "If that email is registered, you will receive a password reset link shortly."
+        }
+    
+    # Generate reset token
+    token_service = get_token_service()
+    reset_token, token_hash, expiry = token_service.create_password_reset_token()
+    
+    # Store reset token
+    success = user_store.set_password_reset_token(username, token_hash, expiry)
+    if not success:
+        log.error(f"Failed to set password reset token for {username}")
+        return {
+            "ok": True,
+            "message": "If that email is registered, you will receive a password reset link shortly."
+        }
+    
+    # Send reset email
+    email_service = get_email_service()
+    email_sent = email_service.send_password_reset_email(email, username, reset_token)
+    
+    if not email_sent:
+        log.error(f"Failed to send password reset email to {email}")
+    
+    return {
+        "ok": True,
+        "message": "If that email is registered, you will receive a password reset link shortly."
+    }
+
+@app.post("/auth/reset-password")
+def reset_password(body: Dict[str, Any]):
+    """
+    Reset password with token from email.
+    POST {"token": "...", "new_password": "..."}
+    """
+    if body is None:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    
+    token = body.get("token", "").strip()
+    new_password = body.get("new_password", "")
+    
+    if not token:
+        raise HTTPException(status_code=400, detail="Reset token is required")
+    if not new_password:
+        raise HTTPException(status_code=400, detail="New password is required")
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    
+    token_service = get_token_service()
+    user_store = get_user_store()
+    
+    # Hash the token to find the user
+    token_hash = token_service.hash_token(token)
+    username = user_store.find_user_by_reset_token(token_hash)
+    
+    if not username:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    
+    # Get token data
+    token_data = user_store.get_password_reset_token(username)
+    if not token_data or not token_data.get("token_hash"):
+        raise HTTPException(status_code=400, detail="No reset token found")
+    
+    # Verify token
+    is_valid = token_service.verify_token(
+        token, 
+        token_data["token_hash"], 
+        token_data["expiry"]
+    )
+    
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    
+    # Reset password
+    success = user_store.reset_password(username, new_password)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to reset password")
+    
+    return {
+        "ok": True,
+        "message": "Password reset successfully! You can now log in with your new password."
+    }
 
 # ─────────────────── Health ───────────────────
 @app.get("/health")
@@ -224,7 +537,7 @@ async def ask(payload: AskRequest, user: User = Depends(get_current_user)):
     hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
     hits = _filter_hits_by_doc(hits, doc_id, 50)
     hits = dedupe_hits(hits)
-    hits = cap_per_doc(hits, per_doc=int(os.getenv("MAX_CHUNKS_PER_DOC", "3")))
+    hits = cap_per_doc(hits, per_doc=int(os.getenv("MAX_CHUNKS_PER_DOC", "5")))
     hits = mmr_rerank(payload.question, hits, top_k=payload.top_k)
 
     try:
@@ -235,6 +548,100 @@ async def ask(payload: AskRequest, user: User = Depends(get_current_user)):
     for h in hits:
         h["text"] = (h.get("text") or "")[:400]
     return {"results": hits}
+
+# ───────────── Advanced RAG Helper ─────────────
+def advanced_rag_retrieve(
+    question: str,
+    INDEX,
+    doc_id: Optional[str] = None,
+    top_k: int = 10,
+    use_advanced: bool = True
+) -> List[Dict]:
+    """
+    Advanced RAG retrieval pipeline with all improvements.
+    
+    Pipeline:
+    1. Query expansion
+    2. Semantic search (FAISS)
+    3. Hybrid search (BM25 + semantic)
+    4. Cross-encoder reranking
+    5. Context optimization
+    """
+    start_time = time.time()
+    
+    # Step 1: Query expansion for better retrieval
+    if use_advanced and os.getenv("ENABLE_QUERY_EXPANSION", "1") == "1":
+        expanded_question = expand_query_simple(question)
+        log.info(f"Query expanded: '{question}' → '{expanded_question}'")
+    else:
+        expanded_question = question
+    
+    # Step 2: Semantic search with expanded query
+    qemb = embed_texts([expanded_question])[0]
+    semantic_hits = INDEX.search(qemb, k=max(50, top_k * 5))  # Get more for better reranking
+    semantic_hits = _filter_hits_by_doc(semantic_hits, doc_id, 100)
+    semantic_hits = dedupe_hits(semantic_hits)
+    
+    # Step 3: Hybrid search (combine semantic + BM25)
+    if use_advanced and os.getenv("ENABLE_HYBRID_SEARCH", "1") == "1":
+        try:
+            hybrid_searcher = get_hybrid_searcher(alpha=0.7)  # 70% semantic, 30% BM25
+            
+            # Index corpus for BM25 (if not already done)
+            if not hybrid_searcher.corpus_texts or len(hybrid_searcher.corpus_texts) != len(semantic_hits):
+                texts = [hit.get("text", "") for hit in semantic_hits]
+                hybrid_searcher.index_corpus(texts, semantic_hits)
+            
+            # Perform hybrid search
+            hits = hybrid_searcher.search(question, semantic_hits, top_k=top_k * 3)
+            log.info(f"Hybrid search: {len(semantic_hits)} → {len(hits)} results")
+        except Exception as e:
+            log.error(f"Hybrid search failed: {e}, using semantic only")
+            hits = semantic_hits
+    else:
+        hits = semantic_hits
+    
+    # Step 4: Cap per document and dedupe
+    hits = cap_per_doc(hits, per_doc=int(os.getenv("MAX_CHUNKS_PER_DOC", "5")))
+    
+    # Step 5: Cross-encoder reranking for accuracy
+    if use_advanced and os.getenv("ENABLE_RERANKING", "1") == "1":
+        try:
+            reranker = get_reranker()
+            hits = reranker.rerank(question, hits, top_k=top_k * 2)
+            log.info(f"Reranked results with cross-encoder")
+        except Exception as e:
+            log.error(f"Reranking failed: {e}, using original order")
+    
+    # Step 6: Context optimization
+    if use_advanced:
+        try:
+            optimizer = get_context_optimizer()
+            hits = optimizer.optimize_context(hits, max_chunks=top_k)
+            log.info(f"Context optimized: {len(hits)} final chunks")
+        except Exception as e:
+            log.error(f"Context optimization failed: {e}")
+            hits = hits[:top_k]
+    else:
+        hits = mmr_rerank(question, hits, top_k=top_k)
+    
+    # Log metrics
+    retrieval_time = time.time() - start_time
+    try:
+        evaluator = get_evaluator()
+        avg_score = sum(h.get("hybrid_score", h.get("score", 0)) for h in hits) / len(hits) if hits else 0
+        evaluator.log_retrieval(
+            query=question,
+            results_count=len(hits),
+            avg_score=avg_score,
+            retrieval_time=retrieval_time,
+            method="advanced_rag" if use_advanced else "standard"
+        )
+    except Exception:
+        pass
+    
+    return hits
+
 
 # ───────────── Chat (non-streaming) ─────────────
 @app.post("/chat", dependencies=[Depends(limit_chat)])
@@ -248,18 +655,15 @@ async def chat(payload: ChatRequest, user: User = Depends(get_current_user)):
     if doc_id and hasattr(INDEX, "count") and INDEX.count(doc_id) == 0:
         return {"answer": "Still indexing that PDF. Try again in a few seconds.", "citations": []}
 
-    qemb = embed_texts([payload.question])[0]
-    hits = INDEX.search(qemb, k=max(50, payload.top_k * 3))
-    hits = _filter_hits_by_doc(hits, doc_id, 50)
-    hits = dedupe_hits(hits)
-    hits = cap_per_doc(hits, per_doc=int(os.getenv("MAX_CHUNKS_PER_DOC", "3")))
-    hits = mmr_rerank(payload.question, hits, top_k=payload.top_k)
+    # Use advanced RAG pipeline
+    use_advanced = os.getenv("ENABLE_ADVANCED_RAG", "1") == "1"
+    hits = advanced_rag_retrieve(payload.question, INDEX, doc_id, payload.top_k, use_advanced)
 
     if not hits or hits[0].get("score", 0) < 0.05:
         return {"answer": "I don't know. I couldn't find enough supporting context.", "citations": []}
 
     try:
-        log_event("chat", {"user_id": user.user_id, "q": payload.question, "scope": doc_id or "ALL", "n": len(hits)})
+        log_event("chat", {"user_id": user.user_id, "q": payload.question, "scope": doc_id or "ALL", "n": len(hits), "advanced": use_advanced})
     except Exception:
         pass
 
@@ -272,8 +676,10 @@ async def chat_stream(
     question: str,
     top_k: int = 5,
     doc_id: Optional[str] = None,
-    user: User = Depends(get_current_user),
+    token: Optional[str] = None,  # Accept token as query param for EventSource
 ):
+    # Auth: EventSource can't set headers, so we accept token as query param
+    user = get_current_user_query(token)
     INDEX = INDEXES.for_user(user.user_id)
 
     if hasattr(INDEX, "is_empty") and INDEX.is_empty():
@@ -289,15 +695,12 @@ async def chat_stream(
             yield {"event": "done", "data": '{"citations": []}'}
         return EventSourceResponse(indexing_stream())
 
-    qemb = embed_texts([question])[0]
-    hits = INDEX.search(qemb, k=max(50, top_k * 3))
-    hits = _filter_hits_by_doc(hits, doc_id, 50)
-    hits = dedupe_hits(hits)
-    hits = cap_per_doc(hits, per_doc=int(os.getenv("MAX_CHUNKS_PER_DOC", "3")))
-    hits = mmr_rerank(question, hits, top_k=top_k)
+    # Use advanced RAG pipeline
+    use_advanced = os.getenv("ENABLE_ADVANCED_RAG", "1") == "1"
+    hits = advanced_rag_retrieve(question, INDEX, doc_id, top_k, use_advanced)
 
     try:
-        log_event("chat_stream", {"user_id": user.user_id, "q": question, "scope": doc_id or "ALL", "n": len(hits)})
+        log_event("chat_stream", {"user_id": user.user_id, "q": question, "scope": doc_id or "ALL", "n": len(hits), "advanced": use_advanced})
     except Exception:
         pass
 
@@ -311,10 +714,16 @@ async def chat_stream(
     cits_json = json.dumps({"citations": citations_from(hits)})
 
     async def event_generator():
+        import asyncio
+        last_ping = time.time()
         for piece in stream_openai(messages):
             if await request.is_disconnected():
                 break
             yield {"event": "token", "data": piece}
+            # Send periodic heartbeat to keep connection alive
+            if time.time() - last_ping > 15:
+                yield {"event": "ping", "data": ""}
+                last_ping = time.time()
         yield {"event": "done", "data": cits_json}
 
     return EventSourceResponse(event_generator())

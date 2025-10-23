@@ -12,3 +12,13 @@
 {"ts": 1761085443.6908615, "kind": "chat", "user_id": "demo", "q": "What is this pdf about?", "scope": "ALL", "n": 5}
 {"ts": 1761085457.5692763, "kind": "chat", "user_id": "demo", "q": "What is this pdf about?", "scope": "ALL", "n": 5}
 {"ts": 1761085482.3294551, "kind": "chat", "user_id": "demo", "q": "What is the pdf about?", "scope": "ALL", "n": 3}
+{"ts": 1761192067.211852, "kind": "chat_stream", "user_id": "demo", "q": "What is this pdf about?", "scope": "e09cb459-e20a-4cfa-9dd8-d90df65d243c", "n": 3}
+{"ts": 1761192147.0543516, "kind": "chat_stream", "user_id": "demo", "q": "who is the author of this paper?", "scope": "e09cb459-e20a-4cfa-9dd8-d90df65d243c", "n": 3}
+{"ts": 1761192244.713819, "kind": "chat_stream", "user_id": "demo", "q": "What is this pdf about?", "scope": "ALL", "n": 3}
+{"ts": 1761192672.22004, "kind": "chat_stream", "user_id": "Rahul0776", "q": "What is this project about?", "scope": "14bec471-13c5-450b-84e3-f1276efa870e", "n": 3}
+{"ts": 1761193175.5197926, "kind": "chat_stream", "user_id": "Rahul0776", "q": "What are both of the pdf about?", "scope": "ALL", "n": 4}
+{"ts": 1761193222.786739, "kind": "chat_stream", "user_id": "Rahul0776", "q": "What are all of the pdf about?", "scope": "ALL", "n": 5}
+{"ts": 1761193707.6755767, "kind": "chat_stream", "user_id": "Rahul0776", "q": "What are these documents about?", "scope": "ALL", "n": 10}
+{"ts": 1761200229.8448877, "kind": "chat_stream", "user_id": "Rahul0", "q": "What is this pdf about", "scope": "6f9981d6-8da5-4f95-a21d-366992ea7109", "n": 5, "advanced": true}
+{"ts": 1761201862.9346445, "kind": "chat_stream", "user_id": "Rahul0", "q": "What is this pdf about?", "scope": "1d1452b7-3fcb-459c-8483-26f0286aaacf", "n": 5, "advanced": true}
+{"ts": 1761202130.8385553, "kind": "chat_stream", "user_id": "Rahul0", "q": "What is this", "scope": "1d1452b7-3fcb-459c-8483-26f0286aaacf", "n": 5, "advanced": true}

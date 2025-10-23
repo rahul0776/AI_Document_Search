@@ -25,14 +25,8 @@ def issue_token(user_id: str, email: str | None = None, hours: int = 24) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-def get_current_user(authorization: t.Optional[str] = Header(None)) -> User:
-    if DEV_NO_AUTH:
-        return User(user_id="demo", email="demo@example.com")
-
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-
-    token = authorization.split(" ", 1)[1].strip()
+def verify_token(token: str) -> User:
+    """Decode and verify a JWT token, returning the User."""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG], options={"require": ["iss", "sub", "exp"]})
         if payload.get("iss") != JWT_ISS:
@@ -43,3 +37,24 @@ def get_current_user(authorization: t.Optional[str] = Header(None)) -> User:
         return User(user_id=sub, email=payload.get("email"))
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+def get_current_user(authorization: t.Optional[str] = Header(None)) -> User:
+    """Extract user from Authorization header (Bearer token)."""
+    if DEV_NO_AUTH:
+        return User(user_id="demo", email="demo@example.com")
+
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+
+    token = authorization.split(" ", 1)[1].strip()
+    return verify_token(token)
+
+def get_current_user_query(token: t.Optional[str] = None) -> User:
+    """Extract user from query parameter token (for EventSource/SSE)."""
+    if DEV_NO_AUTH:
+        return User(user_id="demo", email="demo@example.com")
+
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+
+    return verify_token(token)
