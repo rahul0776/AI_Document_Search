@@ -488,7 +488,7 @@ async def upload(
 
     META = meta_for(user)
     try:
-        META.add(doc_id, file.filename, pages=0)  # provisional so it appears in list
+        META.add(user.user_id, doc_id, file.filename, pages=0)  # provisional so it appears in list
     except Exception:
         log.exception(f"[META] provisional add failed for {doc_id}")
 
@@ -506,7 +506,7 @@ async def upload(
 
             title = guess_title(pages) or file.filename.rsplit(".", 1)[0]
             try:
-                META.add(doc_id, file.filename, pages=len(pages), title=title)
+                META.add(user.user_id, doc_id, file.filename, pages=len(pages), title=title)
             except Exception:
                 pass
 
