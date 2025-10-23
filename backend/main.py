@@ -782,3 +782,9 @@ def delete_doc(doc_id: str, user: User = Depends(get_current_user)):
         pass
 
     return {"ok": True}
+
+# For Railway deployment
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
