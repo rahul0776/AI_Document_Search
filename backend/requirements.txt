@@ -15,4 +15,3 @@ PyMuPDF
 numpy
 sendgrid
 rank-bm25
-sentence-transformers
