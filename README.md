@@ -17,6 +17,16 @@
 
 ---
 
+## 🌐 Live Demo
+
+**👉 [Try it now: https://ai-document-search.vercel.app](https://ai-document-search.vercel.app)**
+
+Experience the application in action! Upload a PDF and start asking questions.
+
+> **Note**: First-time load may take ~50 seconds due to free-tier cold start on Render. Subsequent requests are fast!
+
+---
+
 ## 🎯 Project Overview
 
 A sophisticated full-stack application demonstrating **modern software engineering practices** and **cutting-edge AI implementation**. Users can upload PDF documents and engage in intelligent conversations, with the system providing accurate, cited answers by combining semantic search with Large Language Models.
