@@ -43,7 +43,7 @@ from middleware.ratelimit import limit_chat
 # ── Advanced RAG features (Day 5-7)
 from retrieval.hybrid_search import get_hybrid_searcher
 from retrieval.query_expansion import expand_query_simple
-from retrieval.advanced_rerank import get_reranker
+# from retrieval.advanced_rerank import get_reranker  # Disabled for memory optimization
 from services.context_optimizer import get_context_optimizer
 from services.rag_evaluator import get_evaluator
 from ingestion.smart_chunker import chunk_documents_smart
@@ -611,14 +611,14 @@ def advanced_rag_retrieve(
     # Step 4: Cap per document and dedupe
     hits = cap_per_doc(hits, per_doc=int(os.getenv("MAX_CHUNKS_PER_DOC", "5")))
     
-    # Step 5: Cross-encoder reranking for accuracy
-    if use_advanced and os.getenv("ENABLE_RERANKING", "1") == "1":
-        try:
-            reranker = get_reranker()
-            hits = reranker.rerank(question, hits, top_k=top_k * 2)
-            log.info(f"Reranked results with cross-encoder")
-        except Exception as e:
-            log.error(f"Reranking failed: {e}, using original order")
+    # Step 5: Cross-encoder reranking for accuracy (disabled for memory optimization)
+    # if use_advanced and os.getenv("ENABLE_RERANKING", "1") == "1":
+    #     try:
+    #         reranker = get_reranker()
+    #         hits = reranker.rerank(question, hits, top_k=top_k * 2)
+    #         log.info(f"Reranked results with cross-encoder")
+    #     except Exception as e:
+    #         log.error(f"Reranking failed: {e}, using original order")
     
     # Step 6: Context optimization
     if use_advanced:
