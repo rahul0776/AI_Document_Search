@@ -243,8 +243,8 @@ export default function HomePage({ onSignIn, onGetStarted }: Props) {
               <a href="#how">How it works</a>
               <a href="#features">Features</a>
               <a href="#api">API</a>
-              <a href="#" onClick={(e) => e.preventDefault()}>Privacy</a>
-              <a href="#" onClick={(e) => e.preventDefault()}>Terms</a>
+              <button type="button" className="link-stub">Privacy</button>
+              <button type="button" className="link-stub">Terms</button>
             </div>
           </div>
           <p className="footer-note">© 2026 <span className="brand-name">{BRAND}</span> · Answers with receipts.</p>
