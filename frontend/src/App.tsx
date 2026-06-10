@@ -20,6 +20,8 @@ export default function App() {
   const [me, setMe] = useState<{ user_id: string; email?: string; email_verified?: boolean } | null>(null);
   const [, setAuthErr] = useState(""); // Used internally but not displayed
   const [isAuthChecking, setIsAuthChecking] = useState(true);
+  // True when the session check is taking long (free-tier backend cold start)
+  const [authSlow, setAuthSlow] = useState(false);
 
   // current “active” doc id (the one you just uploaded)
   const [docId, setDocId] = useState<string>("");
@@ -66,12 +68,21 @@ export default function App() {
   // Try to restore session on mount
   useEffect(() => {
     if (route !== "app") return; // Don't check auth for special routes
-    
+
     let cancelled = false;
+    const controller = new AbortController();
+    // After 4s of waiting, explain the free-tier cold start instead of a bare spinner
+    const slowTimer = window.setTimeout(() => {
+      if (!cancelled) setAuthSlow(true);
+    }, 4000);
+    // Hard cap: never hang on "Loading..." forever
+    const capTimer = window.setTimeout(() => controller.abort(), 90000);
+
     (async () => {
       setIsAuthChecking(true);
+      setAuthSlow(false);
       try {
-        const u = await getMe();
+        const u = await getMe(controller.signal);
         if (!cancelled) {
           setMe(u);
           setAuthErr("");
@@ -81,13 +92,25 @@ export default function App() {
         if (!cancelled) {
           setMe(null);
           setAuthErr(e?.message || "Please sign in.");
+          // Stale token or unreachable server while sitting at "/":
+          // fall back to the public homepage instead of a dead end.
+          if (window.location.pathname === "/") {
+            localStorage.removeItem("token");
+            setRoute("home");
+          }
         }
       } finally {
-        if (!cancelled) setIsAuthChecking(false);
+        if (!cancelled) {
+          setIsAuthChecking(false);
+          setAuthSlow(false);
+        }
       }
     })();
     return () => {
       cancelled = true;
+      window.clearTimeout(slowTimer);
+      window.clearTimeout(capTimer);
+      controller.abort();
       // safety: close any open SSE on unmount
       closeStreamRef.current?.();
     };
@@ -329,6 +352,13 @@ export default function App() {
             </svg>
           </div>
           <p className="text-gray-600">Loading...</p>
+          {authSlow && (
+            <p className="text-gray-500 text-sm mt-3 max-w-xs mx-auto">
+              Waking up the server — free hosting sleeps when idle.
+              <br />
+              This can take up to a minute.
+            </p>
+          )}
         </div>
       </div>
     );

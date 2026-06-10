@@ -56,8 +56,13 @@ export async function login(username: string, password: string) {
   }) as Promise<{ token: string; user: { user_id: string; email?: string } }>;
 }
 
-export async function getMe() {
-  return fetchJson(`${API_BASE}/me`) as Promise<{ user_id: string; email?: string; email_verified?: boolean }>;
+export async function getMe(signal?: AbortSignal) {
+  return fetchJson(`${API_BASE}/me`, { signal }) as Promise<{ user_id: string; email?: string; email_verified?: boolean }>;
+}
+
+/** Fire-and-forget ping to wake the free-tier backend from cold start. */
+export function warmBackend() {
+  fetch(`${API_BASE}/health`).catch(() => {});
 }
 
 export async function verifyEmail(token: string) {

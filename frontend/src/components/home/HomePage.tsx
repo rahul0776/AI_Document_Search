@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import HeroDemo from "./HeroDemo";
+import { warmBackend } from "../../lib/api";
 import "./homepage.css";
 
 /* Marketing homepage recreated from design_handoff_homepage.
@@ -22,6 +23,12 @@ function Logo() {
 
 export default function HomePage({ onSignIn, onGetStarted }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
+
+  // Wake the free-tier backend while the visitor reads the page, so
+  // sign-in/sign-up is fast by the time they click a CTA.
+  useEffect(() => {
+    warmBackend();
+  }, []);
 
   // Reveal on scroll, with the prototype's fallback: if the observer
   // hasn't fired ~800ms after mount, reveal everything immediately so
