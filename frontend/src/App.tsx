@@ -9,11 +9,12 @@ import VerifyEmail from "./components/VerifyEmail";
 import ForgotPassword from "./components/ForgotPassword";
 import ResetPassword from "./components/ResetPassword";
 import ThemeToggle from "./components/ThemeToggle";
+import HomePage from "./components/home/HomePage";
 
 /* ───────────── App ───────────── */
 export default function App() {
   // Routing state
-  const [route, setRoute] = useState<"login" | "verify-email" | "forgot-password" | "reset-password" | "app">("app");
+  const [route, setRoute] = useState<"home" | "login" | "verify-email" | "forgot-password" | "reset-password" | "app">("app");
 
   // Auth/session
   const [me, setMe] = useState<{ user_id: string; email?: string; email_verified?: boolean } | null>(null);
@@ -54,6 +55,9 @@ export default function App() {
       setRoute("forgot-password");
     } else if (path === "/verify-email" || params.has("token")) {
       setRoute("verify-email");
+    } else if (path === "/" && !localStorage.getItem("token")) {
+      // Logged-out visitors land on the marketing homepage
+      setRoute("home");
     } else {
       setRoute("app");
     }
@@ -116,6 +120,14 @@ export default function App() {
     setDocId("");
     setQueryScopeDoc(null);
     setChatMessages([]);
+    setRoute("home");
+    window.history.pushState({}, "", "/");
+  }
+
+  // Homepage CTAs → auth screen of the app
+  function handleEnterApp() {
+    setRoute("app");
+    window.history.pushState({}, "", "/app");
   }
 
   async function handleUpload(file: File) {
@@ -277,6 +289,10 @@ export default function App() {
   }
 
   // Handle special routes
+  if (route === "home") {
+    return <HomePage onSignIn={handleEnterApp} onGetStarted={handleEnterApp} />;
+  }
+
   if (route === "verify-email") {
     return <VerifyEmail onSuccess={() => {
       setRoute("app");
