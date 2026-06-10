@@ -1,7 +1,11 @@
 // frontend/src/lib/api.ts
 
-export const API_BASE =
-  process.env.REACT_APP_API_BASE || "http://localhost:8000";
+const configuredApiBase = process.env.REACT_APP_API_BASE;
+if (!configuredApiBase && process.env.NODE_ENV === "production") {
+  // Fail loudly instead of silently pointing a production build at localhost.
+  throw new Error("REACT_APP_API_BASE must be set at build time for production builds.");
+}
+export const API_BASE = configuredApiBase || "http://localhost:8000";
 
 /* ───────────── Shared helpers ───────────── */
 function getToken() {
@@ -49,13 +53,6 @@ export async function login(username: string, password: string) {
   return fetchJson(`${API_BASE}/auth/login`, {
     method: "POST",
     body: JSON.stringify({ username, password }),
-  }) as Promise<{ token: string; user: { user_id: string; email?: string } }>;
-}
-
-export async function devLogin(user_id: string, email?: string) {
-  return fetchJson(`${API_BASE}/auth/dev_login`, {
-    method: "POST",
-    body: JSON.stringify({ user_id, email }),
   }) as Promise<{ token: string; user: { user_id: string; email?: string } }>;
 }
 
@@ -139,9 +136,10 @@ export async function chat(
 }
 
 /**
- * Streaming chat (SSE).
- * EventSource can’t send headers; we append `token` as a query param.
- * Backend should accept either Header Bearer or ?token=… (Day 13 Option A).
+ * Streaming chat (SSE over fetch).
+ * We stream with fetch + ReadableStream instead of EventSource so the JWT can be
+ * sent in the Authorization header — never as a query param that ends up in
+ * proxy/access logs and browser history.
  */
 export function chatStream(
   question: string,
@@ -155,26 +153,77 @@ export function chatStream(
   url.searchParams.set("question", question);
   url.searchParams.set("top_k", String(top_k));
   if (docId) url.searchParams.set("doc_id", docId);
-  const t = getToken();
-  if (t) url.searchParams.set("token", t); // << add token for SSE
 
-  const es = new EventSource(url.toString());
+  const controller = new AbortController();
+  let closed = false;
 
-  es.addEventListener("token", (ev: MessageEvent) => onToken(ev.data));
-  es.addEventListener("done", (ev: MessageEvent) => {
+  (async () => {
     try {
-      onDone(JSON.parse(ev.data));
-    } catch {
-      onDone({ citations: [] });
-    } finally {
-      es.close();
+      const headers: Record<string, string> = { Accept: "text/event-stream" };
+      const t = getToken();
+      if (t) headers.Authorization = `Bearer ${t}`;
+
+      const res = await fetch(url.toString(), { headers, signal: controller.signal });
+      if (!res.ok || !res.body) throw new Error(`Stream failed (${res.status})`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let eventName = "message";
+      let dataLines: string[] = [];
+
+      const dispatch = () => {
+        if (dataLines.length === 0) {
+          eventName = "message";
+          return;
+        }
+        const data = dataLines.join("\n");
+        const ev = eventName;
+        dataLines = [];
+        eventName = "message";
+        if (ev === "token") {
+          onToken(data);
+        } else if (ev === "done") {
+          closed = true;
+          controller.abort();
+          try {
+            onDone(JSON.parse(data));
+          } catch {
+            onDone({ citations: [] });
+          }
+        }
+        // "ping" heartbeats are ignored
+      };
+
+      // Minimal SSE parser: lines are "event: ..." / "data: ...", blank line dispatches.
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          let line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line === "") {
+            dispatch();
+          } else if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).replace(/^ /, ""));
+          }
+        }
+      }
+    } catch (e) {
+      if (!closed) onError?.(e);
     }
-  });
-  es.onerror = (e) => {
-    es.close();
-    onError?.(e);
+  })();
+
+  // Returned closer: user-initiated stop must not trigger onError.
+  return () => {
+    closed = true;
+    controller.abort();
   };
-  return () => es.close();
 }
 
 /* ───────────── Docs ───────────── */

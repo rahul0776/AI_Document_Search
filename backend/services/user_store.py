@@ -5,6 +5,7 @@ Uses bcrypt for password hashing (industry standard).
 """
 from __future__ import annotations
 import json
+import threading
 import bcrypt
 from pathlib import Path
 from typing import Dict, Optional
@@ -49,7 +50,11 @@ def verify_password(password: str, hashed: str) -> bool:
 
 class UserStore:
     """Simple file-based user storage."""
-    
+
+    # Shared across instances: every read-modify-write of users.json must hold this,
+    # or concurrent signups/resets overwrite each other's changes.
+    _LOCK = threading.RLock()
+
     def __init__(self, data_dir: str = "./data"):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -89,25 +94,26 @@ class UserStore:
         Create a new user with optional email verification token.
         Returns True if successful, False if user already exists.
         """
-        users = self._load_users()
-        
-        if username in users:
-            return False
-        
-        import time
-        users[username] = {
-            "password_hash": hash_password(password),
-            "email": email,
-            "email_verified": False,  # Email starts unverified
-            "verification_token_hash": verification_token_hash,
-            "verification_token_expiry": verification_token_expiry,
-            "password_reset_token_hash": None,
-            "password_reset_token_expiry": None,
-            "created_at": time.time(),
-        }
-        
-        self._save_users(users)
-        return True
+        with self._LOCK:
+            users = self._load_users()
+
+            if username in users:
+                return False
+
+            import time
+            users[username] = {
+                "password_hash": hash_password(password),
+                "email": email,
+                "email_verified": False,  # Email starts unverified
+                "verification_token_hash": verification_token_hash,
+                "verification_token_expiry": verification_token_expiry,
+                "password_reset_token_hash": None,
+                "password_reset_token_expiry": None,
+                "created_at": time.time(),
+            }
+
+            self._save_users(users)
+            return True
     
     def verify_user(self, username: str, password: str) -> Optional[Dict]:
         """
@@ -152,17 +158,18 @@ class UserStore:
         Mark user's email as verified.
         Returns True if successful, False if user not found.
         """
-        users = self._load_users()
-        
-        if username not in users:
-            return False
-        
-        users[username]["email_verified"] = True
-        users[username]["verification_token_hash"] = None
-        users[username]["verification_token_expiry"] = None
-        
-        self._save_users(users)
-        return True
+        with self._LOCK:
+            users = self._load_users()
+
+            if username not in users:
+                return False
+
+            users[username]["email_verified"] = True
+            users[username]["verification_token_hash"] = None
+            users[username]["verification_token_expiry"] = None
+
+            self._save_users(users)
+            return True
     
     def set_password_reset_token(
         self, 
@@ -174,16 +181,17 @@ class UserStore:
         Set password reset token for user.
         Returns True if successful, False if user not found.
         """
-        users = self._load_users()
-        
-        if username not in users:
-            return False
-        
-        users[username]["password_reset_token_hash"] = token_hash
-        users[username]["password_reset_token_expiry"] = expiry
-        
-        self._save_users(users)
-        return True
+        with self._LOCK:
+            users = self._load_users()
+
+            if username not in users:
+                return False
+
+            users[username]["password_reset_token_hash"] = token_hash
+            users[username]["password_reset_token_expiry"] = expiry
+
+            self._save_users(users)
+            return True
     
     def get_verification_token(self, username: str) -> Optional[Dict]:
         """
@@ -248,17 +256,18 @@ class UserStore:
         Reset user's password and clear reset token.
         Returns True if successful, False if user not found.
         """
-        users = self._load_users()
-        
-        if username not in users:
-            return False
-        
-        users[username]["password_hash"] = hash_password(new_password)
-        users[username]["password_reset_token_hash"] = None
-        users[username]["password_reset_token_expiry"] = None
-        
-        self._save_users(users)
-        return True
+        with self._LOCK:
+            users = self._load_users()
+
+            if username not in users:
+                return False
+
+            users[username]["password_hash"] = hash_password(new_password)
+            users[username]["password_reset_token_hash"] = None
+            users[username]["password_reset_token_expiry"] = None
+
+            self._save_users(users)
+            return True
     
     def get_user_by_email(self, email: str) -> Optional[str]:
         """

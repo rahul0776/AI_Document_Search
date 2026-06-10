@@ -48,12 +48,12 @@ export default function App() {
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
     
-    if (path === "/verify-email" || params.has("token")) {
-      setRoute("verify-email");
-    } else if (path === "/reset-password") {
+    if (path === "/reset-password") {
       setRoute("reset-password");
     } else if (path === "/forgot-password") {
       setRoute("forgot-password");
+    } else if (path === "/verify-email" || params.has("token")) {
+      setRoute("verify-email");
     } else {
       setRoute("app");
     }

@@ -5,10 +5,21 @@ from fastapi import HTTPException, Header, status
 from pydantic import BaseModel
 import jwt  # PyJWT
 
-JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "devsecret")
+# Production is detected via RENDER (set automatically by Render) or ENV=production.
+IS_PROD = os.getenv("RENDER") is not None or os.getenv("ENV", "").lower() == "production"
+
+JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "")
+if not JWT_SECRET:
+    if IS_PROD:
+        raise RuntimeError(
+            "AUTH_JWT_SECRET must be set in production. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+        )
+    JWT_SECRET = "devsecret"
 JWT_ALG = "HS256"
 JWT_ISS = os.getenv("AUTH_JWT_ISS", "rag-app")
-DEV_NO_AUTH = os.getenv("DEV_NO_AUTH", "0") == "1"
+# Auth bypass for local development only — ignored in production.
+DEV_NO_AUTH = os.getenv("DEV_NO_AUTH", "0") == "1" and not IS_PROD
 
 class User(BaseModel):
     user_id: str
@@ -47,14 +58,4 @@ def get_current_user(authorization: t.Optional[str] = Header(None)) -> User:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
 
     token = authorization.split(" ", 1)[1].strip()
-    return verify_token(token)
-
-def get_current_user_query(token: t.Optional[str] = None) -> User:
-    """Extract user from query parameter token (for EventSource/SSE)."""
-    if DEV_NO_AUTH:
-        return User(user_id="demo", email="demo@example.com")
-
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
-
     return verify_token(token)

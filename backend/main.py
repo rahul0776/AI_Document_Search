@@ -15,15 +15,14 @@ import tempfile
 
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sse_starlette.sse import EventSourceResponse
 
 # ── Auth/user
-from auth import get_current_user, get_current_user_query, User, issue_token
+from auth import get_current_user, User, issue_token
 from services.user_store import get_user_store
 from services.email_service import get_email_service
 from services.token_service import get_token_service
@@ -38,7 +37,7 @@ from services.docmeta import DocMetaStore
 from services.rerank import mmr_rerank
 from services.quality import dedupe_hits, cap_per_doc
 from services.telemetry import log_event
-from middleware.ratelimit import limit_chat
+from middleware.ratelimit import limit_chat, limit_uploads
 
 # ── Advanced RAG features (Day 5-7)
 from retrieval.hybrid_search import get_hybrid_searcher
@@ -95,7 +94,6 @@ app.add_middleware(
 )
 
 INDEXES = IndexRegistry(settings.index_dir)
-app.mount("/files", StaticFiles(directory=settings.upload_dir), name="files")
 
 # ─────────────────── Helpers ───────────────────
 def meta_for(user: User) -> DocMetaStore:
@@ -217,22 +215,6 @@ def login(body: Dict[str, Any]):
     
     token = issue_token(user_id=username, email=user.get("email"), hours=24)
     return {"token": token, "user": {"user_id": username, "email": user.get("email")}}
-
-@app.post("/auth/dev_login")
-def dev_login(body: Dict[str, Any]):
-    """
-    Dev-only endpoint to mint a JWT for quick testing (bypasses password).
-    POST {"user_id": "demo", "email": "demo@example.com"}
-    Only use in development!
-    """
-    if body is None:
-        raise HTTPException(status_code=400, detail="JSON body required")
-    user_id = (body.get("user_id") or "demo").strip()
-    email = (body.get("email") or None)
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id required")
-    token = issue_token(user_id=user_id, email=email, hours=24)
-    return {"token": token, "user": {"user_id": user_id, "email": email}}
 
 @app.get("/me")
 def me(user: User = Depends(get_current_user)):
@@ -456,7 +438,7 @@ def hello():
     return {"message": "Backend is running!"}
 
 # ───────────── Upload ─────────────
-@app.post("/upload", response_model=UploadResponse)
+@app.post("/upload", response_model=UploadResponse, dependencies=[Depends(limit_uploads)])
 async def upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -683,10 +665,10 @@ async def chat_stream(
     question: str,
     top_k: int = 5,
     doc_id: Optional[str] = None,
-    token: Optional[str] = None,  # Accept token as query param for EventSource
+    user: User = Depends(get_current_user),
 ):
-    # Auth: EventSource can't set headers, so we accept token as query param
-    user = get_current_user_query(token)
+    # Auth via Authorization header — the frontend streams with fetch(), not EventSource,
+    # so the JWT never appears in URLs/access logs.
     INDEX = INDEXES.for_user(user.user_id)
 
     if hasattr(INDEX, "is_empty") and INDEX.is_empty():
@@ -742,8 +724,9 @@ def list_docs(user: User = Depends(get_current_user)):
     META = meta_for(user)
 
     try:
-        meta_list = META.all() or []
+        meta_list = META.all_for_user(user.user_id) or []
     except Exception:
+        log.exception("[DOCS] failed to read metadata")
         meta_list = []
 
     meta_map: Dict[str, Dict[str, Any]] = {m["doc_id"]: m for m in meta_list if isinstance(m, dict) and m.get("doc_id")}
@@ -767,6 +750,18 @@ def list_docs(user: User = Depends(get_current_user)):
     docs.sort(key=lambda d: d.get("uploaded_at") or "", reverse=True)
     return {"docs": docs}
 
+@app.get("/documents/{doc_id}/file")
+def get_doc_file(doc_id: str, user: User = Depends(get_current_user)):
+    """Serve a user's own PDF. Replaces the old unauthenticated /files static mount."""
+    try:
+        uuid.UUID(doc_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document id")
+    pdf_path = uploads_dir_for(user) / f"{doc_id}.pdf"
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Document not found")
+    return FileResponse(pdf_path, media_type="application/pdf", filename=f"{doc_id}.pdf")
+
 @app.delete("/documents/{doc_id}")
 def delete_doc(doc_id: str, user: User = Depends(get_current_user)):
     INDEX = INDEXES.for_user(user.user_id)
@@ -784,9 +779,9 @@ def delete_doc(doc_id: str, user: User = Depends(get_current_user)):
 
     try:
         META = meta_for(user)
-        META.delete(doc_id)
+        META.delete(user.user_id, doc_id)
     except Exception:
-        pass
+        log.exception(f"[DELETE] meta delete failed for {doc_id}")
 
     return {"ok": True}
 

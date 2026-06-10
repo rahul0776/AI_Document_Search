@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Document, Page } from "react-pdf";
+import { API_BASE } from "../lib/api";
 
 type Props = {
   docId: string;
@@ -12,8 +13,14 @@ export default function PdfPanel({ docId, page, onClose }: Props) {
   const [curr, setCurr] = useState(page || 1);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // If you use a .env value for API base, replace the hardcoded localhost
-  const fileUrl = `http://localhost:8000/files/${docId}.pdf`;
+  // Memoized so react-pdf doesn't reload the document on every render.
+  const file = useMemo(() => {
+    const token = localStorage.getItem("token") || "";
+    return {
+      url: `${API_BASE}/documents/${docId}/file`,
+      httpHeaders: token ? { Authorization: `Bearer ${token}` } : undefined,
+    };
+  }, [docId]);
 
   useEffect(() => setCurr(page || 1), [page]);
 
@@ -43,7 +50,7 @@ export default function PdfPanel({ docId, page, onClose }: Props) {
 
         <div ref={containerRef} className="flex-1 overflow-auto px-4 py-3">
           <Document
-            file={fileUrl}
+            file={file}
             onLoadSuccess={({ numPages }) => setNumPages(numPages)}
             loading={<div className="p-4 text-sm">Loading PDF…</div>}
             error={<div className="p-4 text-sm text-red-600">Failed to load PDF</div>}

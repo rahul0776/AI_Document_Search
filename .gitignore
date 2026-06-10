@@ -21,6 +21,9 @@ dist/
 *.env
 secrets.toml
 
+# Runtime data: user accounts, uploaded PDFs, indexes, logs, caches
+backend/data/
+
 # OS-specific
 .DS_Store
 Thumbs.db

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Any, List
 import json
+import threading
 
 class LocalStorage:
     """
@@ -11,6 +12,9 @@ class LocalStorage:
       uploads/{user_id}/docs.json
       uploads/{user_id}/queue.jsonl  (index jobs log)
     """
+
+    # Serializes read-modify-write on docs.json across instances/threads.
+    _LOCK = threading.RLock()
 
     def __init__(self, root: str):
         self.root = Path(root)
@@ -47,18 +51,21 @@ class LocalStorage:
         mp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def upsert_doc(self, user_id: str, doc: Dict[str, Any]):
-        rows = self.read_meta(user_id)
-        rows = [x for x in rows if x.get("doc_id") != doc.get("doc_id")]
-        rows.append(doc)
-        self.write_meta(user_id, rows)
+        with self._LOCK:
+            rows = self.read_meta(user_id)
+            rows = [x for x in rows if x.get("doc_id") != doc.get("doc_id")]
+            rows.append(doc)
+            self.write_meta(user_id, rows)
 
     def delete_doc_meta(self, user_id: str, doc_id: str):
-        rows = self.read_meta(user_id)
-        rows = [x for x in rows if x.get("doc_id") != doc_id]
-        self.write_meta(user_id, rows)
+        with self._LOCK:
+            rows = self.read_meta(user_id)
+            rows = [x for x in rows if x.get("doc_id") != doc_id]
+            self.write_meta(user_id, rows)
 
     # ---------- Queue (best-effort log of index jobs) ----------
     def append_queue(self, user_id: str, item: Dict[str, Any]):
         qp = self.queue_path(user_id)
-        with qp.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        with self._LOCK:
+            with qp.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
